@@ -1,6 +1,6 @@
 # Clash Verge AI 分流配置
 
-给 Windows 上的 Clash Verge Rev 用的一套配置和一键脚本，做到三件事：**安全连接 AI、合理分流、安全连接代理。**
+给 Windows 和 Linux 上的 Clash Verge Rev 用的一套配置和一键脚本，做到三件事：**安全连接 AI、合理分流、安全连接代理。**
 
 - **安全连接 AI**：所有 AI 服务，以及它们的登录、验证码、遥测，都走同一个你选定的、支持 AI 的节点；节点不可用时直接断开，不会改走别的出口。AI 域名的 DNS 跟着 AI 节点走，时区和节点所在地一致。
 - **合理分流**：开 TUN 后所有流量进 Clash；国内直连，其余代理，统一用 Loyalsoldier 规则。DNS、AI、其他三层分别从所有订阅的节点里选，互不影响。
@@ -8,10 +8,11 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| [`Setup-ClashAI.ps1`](Setup-ClashAI.ps1) | 一键配置脚本：启动时逐项询问，生成并启用「组合配置」 |
+| [`Setup-ClashAI.ps1`](Setup-ClashAI.ps1) | Windows 版一键配置脚本：启动时逐项询问，生成并启用「组合配置」 |
+| [`setup-clash-ai.sh`](setup-clash-ai.sh) | Linux 版一键配置脚本：生成的组合配置和 Windows 版完全一样 |
 | [`Combined-Profile.template.yaml`](Combined-Profile.template.yaml) | 组合配置模板：不用脚本、手动配置时用 |
 
-## 快速开始
+## 快速开始（Windows）
 
 **前提**：Windows 10/11；已安装 [Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev)，并且至少打开过一次（本文按 2.5.8、内核 Mihomo v1.19.32 写）；至少有一个订阅链接，哪家机场都行，几家都行。网络怎么接都行。
 
@@ -35,6 +36,8 @@
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\Setup-ClashAI.ps1 -Verify
    ```
+
+6. **浏览器设置**：要用浏览器访问 AI，先按[浏览器防泄露](#浏览器防泄露)关掉浏览器自己的安全 DNS、WebRTC、HTTP/3 和 IPv6，再测一遍有没有泄露。
 
 ### 启动时会问的设置
 
@@ -71,6 +74,87 @@ powershell -ExecutionPolicy Bypass -File .\Setup-ClashAI.ps1 -Subscriptions 'all
 **备份与恢复**：动手前，脚本把要改的文件备份到 Clash Verge 配置目录（`%APPDATA%\io.github.clash-verge-rev.clash-verge-rev`）下的 `setup-backup-时间` 文件夹。要恢复，就退出 Clash Verge，把里面的文件拷回配置目录；网卡原来的跃点数和 IPv6 设置记在同一文件夹的两个 json 里。
 
 **验证（`-Verify`）**：TUN 开着时检查 Claude 出口地区、其他网站出口、国内直连、DNS 是否被接管、Clash 自己的境外查询出口、DNS 是否只监听本机，双出口时还查有线是否基本不发数据。TUN 关着时不测 AI 相关项，免得请求直连出去。失效保护需要手动测：AI 组临时选「拒绝」，claude.ai 应该打不开。
+
+## 快速开始（Linux）
+
+[`setup-clash-ai.sh`](setup-clash-ai.sh) 是同一套配置的 Linux 版，适配 Linux 版 Clash Verge Rev（deb / rpm 包）。对同样的订阅和选项，它生成的组合配置和 Windows 版逐行相同。
+
+**前提**：已安装 Clash Verge Rev，并且至少打开过一次；在「订阅」页导入了订阅（导入后不要启用、不要删除）；bash 4.3 以上和 curl，主流发行版都自带。
+
+1. **下载脚本**：同上，用「Download raw file」或下载 ZIP。Linux 版没有 BOM 的问题，复制粘贴保存也行。
+2. **运行脚本**：用**普通用户**运行，不要加 sudo。需要 root 的步骤（时区、对时、双出口的网络设置）脚本会自己调用 sudo，到时会提示输入密码。
+
+   ```bash
+   # 先演练：只生成并检查配置、预览各层节点，什么都不改
+   bash setup-clash-ai.sh --dry-run
+
+   # 正式配置：会提示先退出 Clash Verge
+   bash setup-clash-ai.sh
+   ```
+
+3. **选节点、开 TUN**：打开 Clash Verge，马上到「代理」页给 AI 组选一个节点，再回首页打开「虚拟网卡模式」（TUN；第一次会要求安装服务）。
+4. **验证**：
+
+   ```bash
+   bash setup-clash-ai.sh --verify
+   ```
+
+5. **浏览器设置**：要用浏览器访问 AI，先按[浏览器防泄露](#浏览器防泄露)配置浏览器，再测一遍有没有泄露。
+
+启动时问的设置和 Windows 版一样，参数换成 Linux 习惯的写法：
+
+| Windows 版 | Linux 版 |
+| --- | --- |
+| `-DryRun` / `-Verify` / `-Yes` | `--dry-run` / `--verify` / `--yes` |
+| `-Subscriptions 'all'` / `-AiKeywords ';GPT'` | `--subscriptions all` / `--ai-keywords ';GPT'` |
+| `-TimeZone 'Singapore Standard Time'` | `--timezone Asia/Singapore`（IANA 时区名，用 `timedatectl list-timezones` 查） |
+| `-DnsKeywords` / `-AdBlock` / `-DualExit` | `--dns-keywords` / `--adblock` / `--dual-exit` |
+| `-WiredAdapter` / `-WifiAdapter` / `-HotspotGateway` | `--wired` / `--wifi` / `--gateway` |
+| `-ClashDir` / `-SkipSystem` | `--clash-dir` / `--skip-system` |
+| （无） | `--mihomo 路径`：内核不在 `/usr/bin/verge-mihomo` 时指定 |
+
+和 Windows 版不同的地方：
+
+- **配置目录**：`~/.local/share/io.github.clash-verge-rev.clash-verge-rev`（设了 `$XDG_DATA_HOME` 就在它下面）。备份同样放在这里的 `setup-backup-时间` 文件夹，另有一份 `system-state.txt`，记着原来的时区、网卡地址、路由和热点连接的设置。
+- **时区**：用 `timedatectl set-timezone`；没有 systemd 时改 `/etc/localtime`。
+- **对时**：有 systemd-timesyncd 时，写入 `/etc/systemd/timesyncd.conf.d/50-clash-ai.conf`（阿里云、微软 NTP），删掉这个文件就恢复。用 chrony 的系统只提示怎么加服务器，不改它的配置。
+- **双出口**：需要 NetworkManager。脚本只改热点那条连接：关掉它的 IPv6，把它默认路由的跃点数设成 600；NetworkManager 给有线连接的默认值是 100，所以关 TUN 时走网线。网线那条连接不碰。没有 NetworkManager 时，脚本会告诉你要手动做什么。
+- **验证**：Linux 版默认不写 TUN 设备名，所以按地址 198.18.0.1 找 TUN 网卡；装了 `dig` 时会多查一项「Clash 自己的境外查询出口」。
+
+Linux 版目前在 WSL（Ubuntu 26.04）里用假的配置目录测过；双出口的 NetworkManager 部分和 TUN 开着时的验证，还没在真机上跑过。
+
+## 浏览器防泄露
+
+用浏览器访问 AI 网站前，要自己把浏览器配置好。Clash 管得住系统的流量，但浏览器还有几条自己的路：自带的加密 DNS、WebRTC、HTTP/3 和 IPv6。不处理的话，它们可能暴露你的真实 IP，或者绕开 Clash 的 DNS 分流。
+
+| 要做的事 | 为什么 | Chrome / Edge | Firefox |
+| --- | --- | --- | --- |
+| 关掉安全 DNS（浏览器自带的 DoH） | 浏览器自己用加密 DNS 查域名，就绕过了 Clash 的 DNS 规则表，AI 域名的查询不再跟着 AI 节点走；还可能启用 ECH 把真实域名藏起来，Clash 就没法按域名分流 | Chrome：设置 → 隐私和安全 → 安全 → 关掉「使用安全 DNS」<br>Edge：设置 → 隐私、搜索和服务 → 安全性 → 关掉「使用安全的 DNS」 | 设置 → 隐私与安全 →「基于 HTTPS 的 DNS」选「关闭」 |
+| 限制 WebRTC | 网页可以通过 WebRTC 探测你的 IP。它走 UDP，探测用的服务器在国内时，请求会直连出去，暴露真实 IP | 装 Google 出的「WebRTC Network Limiter」扩展，选「Disable non-proxied UDP (force proxy)」；网页视频通话可能受影响 | `about:config` 里把 `media.peerconnection.enabled` 设成 `false`（不用网页通话时） |
+| 关掉 HTTP/3（QUIC） | 组合配置已经拒绝 UDP 443，浏览器会退回普通 HTTPS；在浏览器里也关掉，就不会每次先试一下 QUIC 再失败 | 地址栏打开 `chrome://flags/#enable-quic`（Edge 是 `edge://flags/#enable-quic`），设成 Disabled | `about:config` 里把 `network.http.http3.enable` 设成 `false` |
+| 关掉 IPv6 | 组合配置只走 IPv4。系统有 IPv6 时，IPv6 连接和 WebRTC 可能不经过 Clash 直接出去，暴露真实的 IPv6 地址 | 浏览器里没有开关，在系统里关（见下） | `about:config` 里把 `network.dns.disableIPv6` 设成 `true`；系统里也关掉更彻底 |
+| 关掉浏览器自带的 VPN 或代理 | 例如 Opera 自带的 VPN，或者接管流量的代理扩展；开着的话，出口就不是 Clash 选的节点 | 关掉这类功能和扩展 | 同左 |
+
+在系统里关 IPv6，只关正在上网的那块网卡就行，网卡名或连接名先查出来：
+
+```powershell
+# Windows（管理员 PowerShell）：先用 Get-NetAdapter 查网卡名
+Disable-NetAdapterBinding -Name '网卡名' -ComponentID ms_tcpip6
+```
+
+```bash
+# Linux（NetworkManager）：先用 nmcli connection show --active 查连接名
+nmcli connection modify '连接名' ipv6.method disabled && nmcli connection up '连接名'
+```
+
+**设置完测一遍**（开着 TUN，用你平时访问 AI 的那个浏览器打开）：
+
+- [ ] WebRTC：[browserleaks.com/webrtc](https://browserleaks.com/webrtc) 里不应出现你本地网络的公网 IP；限制生效时会显示检测不到 IP
+- [ ] DNS：[browserleaks.com/dns](https://browserleaks.com/dns) 或 [ipleak.net](https://ipleak.net) 列出的 DNS 服务器里，不应有国内的（电信、联通、移动、阿里、腾讯、114 等）
+- [ ] IPv6：[test-ipv6.com](https://test-ipv6.com) 应显示没有 IPv6 地址
+- [ ] HTTP/3：[cloudflare-quic.com](https://cloudflare-quic.com) 应显示用的是 HTTP/2，而不是 HTTP/3
+
+这些测试网站走的是「其他」层，所以显示的是「其他」层节点的 IP。AI 的出口用脚本的验证模式查，或者看 `https://claude.ai/cdn-cgi/trace` 里的 `loc=`。
 
 ## 整体结构与原理
 
@@ -113,7 +197,7 @@ flowchart LR
 
 ## 手动配置
 
-不想用脚本，或者想弄懂每一步在做什么，就照下面做。下面这些值随订阅和设备而变，配置前逐一查清。
+不想用脚本，或者想弄懂每一步在做什么，就照下面做。命令以 Windows 为例，Linux 上的对应做法见[快速开始（Linux）](#快速开始linux)里「和 Windows 版不同的地方」。下面这些值随订阅和设备而变，配置前逐一查清。
 
 | 项目 | 例子 | 怎么查 | 用在哪里 |
 | --- | --- | --- | --- |
@@ -239,6 +323,7 @@ AI 层默认是「拒绝」，所以顺序是**先启用、马上选 AI 节点�
 - [ ] Clash 自己的境外查询从 DNS 层出去：`Resolve-DnsName whoami.ds.akahelp.net -Type TXT` 里的 `ecs` 是 DNS 层节点的出口网段
 - [ ] DNS 只监听本机：`Get-NetUDPEndpoint -LocalPort 1053` 只有 127.0.0.1
 - [ ] 失效保护：AI 组临时选「拒绝」，claude.ai 打不开；测完选回节点
+- [ ] 浏览器：按[浏览器防泄露](#浏览器防泄露)设置好，WebRTC、DNS、IPv6、HTTP/3 四项都测过
 
 **TUN 关**
 
