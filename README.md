@@ -37,7 +37,7 @@
    powershell -ExecutionPolicy Bypass -File .\Setup-ClashAI.ps1 -Verify
    ```
 
-6. **浏览器设置**：要用浏览器访问 AI，先按[浏览器防泄露](#浏览器防泄露)关掉浏览器自己的安全 DNS、WebRTC、HTTP/3 和 IPv6，再测一遍有没有泄露。
+6. **浏览器设置**：要用浏览器访问 AI，先按[浏览器防泄露](#浏览器防泄露)关掉浏览器自己的安全 DNS、限制 WebRTC、关掉 HTTP/3，再测一遍有没有泄露。
 
 ### 启动时会问的设置
 
@@ -125,32 +125,19 @@ Linux 版目前在 WSL（Ubuntu 26.04）里用假的配置目录测过；双出�
 
 ## 浏览器防泄露
 
-用浏览器访问 AI 网站前，要自己把浏览器配置好。Clash 管得住系统的流量，但浏览器还有几条自己的路：自带的加密 DNS、WebRTC、HTTP/3 和 IPv6。不处理的话，它们可能暴露你的真实 IP，或者绕开 Clash 的 DNS 分流。
+用浏览器访问 AI 网站前，要自己把浏览器配置好。Clash 管得住系统的流量，但浏览器还有几条自己的路：自带的加密 DNS、WebRTC 和 HTTP/3。不处理的话，它们可能暴露你的真实 IP，或者绕开 Clash 的 DNS 分流。
 
 | 要做的事 | 为什么 | Chrome / Edge | Firefox |
 | --- | --- | --- | --- |
 | 关掉安全 DNS（浏览器自带的 DoH） | 浏览器自己用加密 DNS 查域名，就绕过了 Clash 的 DNS 规则表，AI 域名的查询不再跟着 AI 节点走；还可能启用 ECH 把真实域名藏起来，Clash 就没法按域名分流 | Chrome：设置 → 隐私和安全 → 安全 → 关掉「使用安全 DNS」<br>Edge：设置 → 隐私、搜索和服务 → 安全性 → 关掉「使用安全的 DNS」 | 设置 → 隐私与安全 →「基于 HTTPS 的 DNS」选「关闭」 |
 | 限制 WebRTC | 网页可以通过 WebRTC 探测你的 IP。它走 UDP，探测用的服务器在国内时，请求会直连出去，暴露真实 IP | 装 Google 出的「WebRTC Network Limiter」扩展，选「Disable non-proxied UDP (force proxy)」；网页视频通话可能受影响 | `about:config` 里把 `media.peerconnection.enabled` 设成 `false`（不用网页通话时） |
 | 关掉 HTTP/3（QUIC） | 组合配置已经拒绝 UDP 443，浏览器会退回普通 HTTPS；在浏览器里也关掉，就不会每次先试一下 QUIC 再失败 | 地址栏打开 `chrome://flags/#enable-quic`（Edge 是 `edge://flags/#enable-quic`），设成 Disabled | `about:config` 里把 `network.http.http3.enable` 设成 `false` |
-| 关掉 IPv6 | 组合配置只走 IPv4。系统有 IPv6 时，IPv6 连接和 WebRTC 可能不经过 Clash 直接出去，暴露真实的 IPv6 地址 | 浏览器里没有开关，在系统里关（见下） | `about:config` 里把 `network.dns.disableIPv6` 设成 `true`；系统里也关掉更彻底 |
 | 关掉浏览器自带的 VPN 或代理 | 例如 Opera 自带的 VPN，或者接管流量的代理扩展；开着的话，出口就不是 Clash 选的节点 | 关掉这类功能和扩展 | 同左 |
 
-在系统里关 IPv6，只关正在上网的那块网卡就行，网卡名或连接名先查出来：
-
-```powershell
-# Windows（管理员 PowerShell）：先用 Get-NetAdapter 查网卡名
-Disable-NetAdapterBinding -Name '网卡名' -ComponentID ms_tcpip6
-```
-
-```bash
-# Linux（NetworkManager）：先用 nmcli connection show --active 查连接名
-nmcli connection modify '连接名' ipv6.method disabled && nmcli connection up '连接名'
-```
-
-**设置完测一遍**（开着 TUN，用你平时访问 AI 的那个浏览器打开）：
+**设置完测一遍**：开着 TUN、保持平时的「规则」模式，用你平时访问 AI 的那个浏览器打开下面的网站。不用切全局：测试网站用的是它自己的随机子域名，不在国内域名列表里，查询由 DNS 层节点发给 Cloudflare / Google，或由代理节点在远端解析，不会经过国内 DNS。
 
 - [ ] WebRTC：[browserleaks.com/webrtc](https://browserleaks.com/webrtc) 里不应出现你本地网络的公网 IP；限制生效时会显示检测不到 IP
-- [ ] DNS：[browserleaks.com/dns](https://browserleaks.com/dns) 或 [ipleak.net](https://ipleak.net) 列出的 DNS 服务器里，不应有国内的（电信、联通、移动、阿里、腾讯、114 等）
+- [ ] DNS：[browserleaks.com/dns](https://browserleaks.com/dns) 或 [ipleak.net](https://ipleak.net) 列出的 DNS 服务器应该是 Cloudflare、Google 或节点所在地的；出现国内的（电信、联通、移动、阿里、腾讯、114 等）才是真泄露。有的网站会因为「DNS 服务器和出口 IP 不在同一地区」报泄露，这种不涉及你的真实 IP，可以不管
 - [ ] IPv6：[test-ipv6.com](https://test-ipv6.com) 应显示没有 IPv6 地址
 - [ ] HTTP/3：[cloudflare-quic.com](https://cloudflare-quic.com) 应显示用的是 HTTP/2，而不是 HTTP/3
 
