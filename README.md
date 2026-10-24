@@ -1,17 +1,23 @@
 # Clash Verge AI 分流配置
 
-给 Windows / Linux 上的 Clash Verge Rev 用的一键配置：**AI 服务固定走你选的节点，国内直连，其余走代理**。订阅只当节点来源，改不了你的规则和 DNS。
+给 Windows / macOS / Linux 上的 Clash Verge Rev 用的一键配置：**AI 服务固定走你选的节点，国内直连，其余走代理**。订阅只当节点来源，改不了你的规则和 DNS。
 
 ## 快速开始
 
 **需要**：Clash Verge Rev（装好后至少打开过一次），和至少一个订阅链接。
 
 1. **导入订阅**：Clash Verge 订阅页 → New → Remote，粘贴链接。导入后不要启用，也别删。
-2. **运行脚本**：打开脚本文件（[Windows](Setup-ClashAI.ps1) / [Linux](setup-clash-ai.sh)），点「Download raw file」下载，不要复制粘贴。运行前先通读一遍。运行时按提示选，不确定就直接回车。
+2. **运行脚本**：打开脚本文件（[Windows](Setup-ClashAI.ps1) / [macOS](setup-clash-ai-macos.sh) / [Linux](setup-clash-ai.sh)），点「Download raw file」下载，不要复制粘贴。运行前先通读一遍。运行时按提示选，不确定就直接回车。
    - Windows：在脚本所在文件夹打开**管理员** PowerShell，运行
 
      ```powershell
      powershell -ExecutionPolicy Bypass -File .\Setup-ClashAI.ps1
+     ```
+
+   - macOS：打开「终端」，cd 到脚本所在文件夹，用普通用户运行（系统自带的 bash 就行），需要管理员的步骤脚本会自己调用 sudo。加 `--restart-clash`，脚本会自己退出 Clash Verge，改完再打开
+
+     ```bash
+     bash setup-clash-ai-macos.sh
      ```
 
    - Linux：用普通用户运行，需要 root 的步骤脚本会自己调用 sudo
@@ -22,9 +28,9 @@
 
 3. **选节点、开 TUN**：打开 Clash Verge，在代理页**给 AI 组选一个节点**（AI 组默认是「拒绝」，不选的话 AI 打不开）；「其他」组选一个能正常用 Google 的节点，Gemini 跟着它走。再回首页打开 TUN（虚拟网卡模式）。
 
-**怎么算配好**：再运行一次脚本，Windows 加 `-Verify`，Linux 加 `--verify`，结果里没有「失败」就算配好。要用浏览器访问 AI 的，再按[浏览器防泄露](#浏览器防泄露)设置一下。
+**怎么算配好**：再运行一次脚本，Windows 加 `-Verify`，macOS / Linux 加 `--verify`，结果里没有「失败」就算配好。要用浏览器访问 AI 的，再按[浏览器防泄露](#浏览器防泄露)设置一下。
 
-只想先看看会生成什么、不改任何东西：Windows 加 `-DryRun`，Linux 加 `--dry-run`。
+只想先看看会生成什么、不改任何东西：Windows 加 `-DryRun`，macOS / Linux 加 `--dry-run`。
 
 ---
 
@@ -63,7 +69,7 @@ flowchart LR
 
 ## 脚本选项
 
-| 启动时问的 | 默认 | 参数（Windows / Linux） |
+| 启动时问的 | 默认 | 参数（Windows / macOS、Linux） |
 | --- | --- | --- |
 | 用哪些订阅（序号或名字，逗号分开） | 全部 | `-Subscriptions` / `--subscriptions` |
 | 每个订阅的 AI 节点关键词，区分大小写，如 `GPT`、`新加坡\|台湾` | 按支持 AI 的地区 | `-AiKeywords` / `--ai-keywords`，按订阅顺序用分号隔开 |
@@ -75,7 +81,8 @@ flowchart LR
 - `-Yes` / `--yes`：执行前不再确认。
 - `-SkipSystem` / `--skip-system`：只改 Clash，不动时区和网卡。
 - `-ClashDir` / `--clash-dir`：配置目录不在默认位置时用。
-- `--mihomo`（仅 Linux）：内核不在 `/usr/bin` 时用。
+- `--mihomo`（macOS、Linux）：检查配置用的内核不在默认位置（Linux 是 `/usr/bin`，macOS 是 Clash Verge.app 里）时用。
+- `--restart-clash`（仅 macOS）：由脚本退出 Clash Verge，改完再打开，不用自己去菜单栏退出。
 
 **会改什么**：
 - Clash Verge 的 `config.yaml`：关 IPv6，TUN 开启自动路由和严格路由。
@@ -87,6 +94,14 @@ flowchart LR
 改之前会全部备份到 Clash Verge 配置目录下的 `setup-backup-时间` 文件夹，把里面的文件拷回去就能恢复。脚本不会禁用网卡，不碰订阅链接，也不替你选 AI 节点。
 
 **Windows**：PowerShell 5.1 只认带 BOM 的 UTF-8 脚本，复制粘贴会让中文变成乱码。实在要粘贴，记事本另存为时编码选「带有 BOM 的 UTF-8」。
+
+**macOS**：
+- 配置目录是 `~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev`。
+- 时区用 systemsetup 设置，并关掉「根据位置自动设置时区」，不然系统会按所在地把时区改回去；对时服务器改成 ntp.aliyun.com，并开启自动对时。和现在一样的设置不会去改，都一样时不要管理员密码。
+- 双出口：macOS 没有跃点数，改的是「网络服务顺序」（默认出口排第一，Clash 出口排最后），再用 networksetup 关掉 Clash 出口那个网络服务的 IPv6。
+- 服务模式下内核在另一个目录里运行，实测组合配置里订阅文件的相对路径照样能读到。
+- `--verify` 比另外两版多查三项：各组选的节点、浏览器等程序用的系统 DNS 有没有被 Clash 接管、「根据位置自动设置时区」有没有关。
+- macOS 版在 macOS 27 + Clash Verge Rev 2.5.8（服务模式）上实测过；双出口和需要管理员的系统设置还没在真机上跑过。
 
 **Linux**：
 - 配置目录是 `~/.local/share/io.github.clash-verge-rev.clash-verge-rev`。
@@ -108,7 +123,7 @@ flowchart LR
 | 局限 | 国内网站和局域网也走 Clash 出口，用热点时会耗流量；开着 TUN 时，访问不到默认出口那边的局域网设备 | 默认出口那边的网络能看到你访问了哪些国内网站，以及你在用阿里 / 腾讯的 DoH（看不到代理流量）；默认出口断了，直连会改走 Clash 出口 |
 
 两种模式下，脚本都会：
-- 把默认出口的跃点数设成 1、Clash 出口设成 500；
+- 把默认出口的跃点数设成 1、Clash 出口设成 500（macOS 上是把默认出口排在网络服务顺序的第一位，Clash 出口排最后）；
 - 关掉 Clash 出口的 IPv6，否则关 TUN 时 IPv6 流量可能从它出去；
 - 局域网域名用直连那一侧的 DNS 解析。
 
