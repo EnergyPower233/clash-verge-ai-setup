@@ -10,8 +10,11 @@
   每个选项也可以用参数直接给出，给了就不再问，例如：
     -Subscriptions 'all' -AiKeywords ';GPT' -TimeZone 'Singapore Standard Time' -AdBlock off -DualExit no -Yes
 
+  双出口（-DualExit）：all = 开 TUN 时一切经 Clash 从「Clash 出口」出去，关 TUN 时一切走「默认出口」；
+  split = 直连流量走「默认出口」，代理流量（所有节点）走「Clash 出口」。两个出口各是哪块网卡由你选。
+
   会改什么：Clash Verge 的 config.yaml / verge.yaml / profiles.yaml / 全局扩展覆写配置，新增「组合配置」，
-  系统时区与自动对时；选了双出口时再改两块网卡的跃点数、关热点网卡的 IPv6。改之前全部备份到 Clash Verge 配置目录下的 setup-backup-时间 目录。
+  系统时区与自动对时；选了双出口时再改两块网卡的跃点数、关 Clash 出口那块网卡的 IPv6。改之前全部备份到 Clash Verge 配置目录下的 setup-backup-时间 目录。
   不会做：禁用任何网卡、改订阅链接、替你选 AI 节点。
 #>
 [CmdletBinding()]
@@ -21,12 +24,11 @@ param(
     [string]$Subscriptions,
     [string]$AiKeywords,
     [string]$TimeZone,
-    [string]$DnsKeywords,
     [ValidateSet('off', 'on')][string]$AdBlock,
-    [ValidateSet('no', 'yes')][string]$DualExit,
-    [string]$WiredAdapter,
-    [string]$WifiAdapter,
-    [string]$HotspotGateway,
+    [ValidateSet('no', 'all', 'split', 'yes')][string]$DualExit,   # yes 是旧写法，等于 all
+    [Alias('WiredAdapter')][string]$DefaultAdapter,              # 默认出口：关 TUN 时一切走它；split 时直连也走它
+    [Alias('WifiAdapter')][string]$ClashAdapter,                 # Clash 出口：all 时开 TUN 一切走它；split 时只有节点连接走它
+    [Alias('HotspotGateway')][string]$LanDns,                    # 双出口时，局域网域名用的 DNS
     [string]$ClashDir,       # Clash Verge 配置目录不在默认位置时（例如便携版）用它指定
     [switch]$SkipSystem,     # 只改 Clash，不动时区、对时和网卡
     [switch]$Yes
@@ -43,8 +45,6 @@ $ProfileMarker = '# 组合配置'
 # 默认筛选规则（和文档里的模板一致）
 $RegionAI   = '新加坡|狮城|台湾|日本|韩国|美国|加拿大|英国|德国|法国|荷兰|澳大利亚|Singapore|Taiwan|Japan|Korea|United States|USA|Canada|United Kingdom|Germany|France|Netherlands|Australia'
 $BlockAI    = '香港|澳门|中国|俄罗斯|伊朗|朝鲜|Hong Kong|HongKong|Macau|China|Russia'
-$DnsDefault = '新加坡|狮城|日本|台湾|Singapore|Japan|Taiwan'
-$DnsExclude = '高倍|[2-9]x|[2-9]X|x[2-9]|香港|Hong Kong'
 $InfoFilter = '剩余|到期|套餐|官网|客服|邮箱|重置|过期|支持AI|Traffic|Expire|Reset'
 
 $TimeZones = @(
@@ -125,6 +125,36 @@ function Get-NodeNames([string]$file) {
     return $names | Where-Object { $_ -cnotmatch $InfoFilter }
 }
 
+# 双出口的设置记在全局扩展覆写配置的一行注释里；旧版本只写了 interface-name，那就是 all
+function Get-DualExitState {
+    $merge = Join-Path $VergeDir 'profiles\Merge.yaml'
+    if (-not (Test-Path $merge)) { return $null }
+    $t = Read-Text $merge
+    if ($t -match '(?m)^# setup-clash-ai dual-exit: mode=(all|split); clash=([^;\r\n]+); default=([^;\r\n]*)\r?$') {
+        return [pscustomobject]@{ Mode = $Matches[1]; Clash = $Matches[2].Trim(); Default = $Matches[3].Trim() }
+    }
+    if ($t -match '(?m)^interface-name:\s*(.+?)\s*$') { return [pscustomobject]@{ Mode = 'all'; Clash = $Matches[1]; Default = '' } }
+    return $null
+}
+
+# split 双出口：分别下载 1 MB，看是哪块网卡在收（会经 Clash 出口用掉约 1 MB 流量）
+function Test-SplitExit([string]$clashIf, [string]$defaultIf) {
+    $cases = @(
+        @{ What = "代理流量走 Clash 出口（$clashIf）"; Url = 'https://speed.cloudflare.com/__down?bytes=1048576'; Range = ''; Want = $clashIf; Other = $defaultIf },
+        @{ What = "直连流量走默认出口（$defaultIf）"; Url = 'https://mirrors.aliyun.com/ubuntu/ls-lR.gz'; Range = '0-1048575'; Want = $defaultIf; Other = $clashIf }
+    )
+    foreach ($c in $cases) {
+        $w0 = (Get-NetAdapterStatistics -Name $c.Want).ReceivedBytes; $o0 = (Get-NetAdapterStatistics -Name $c.Other).ReceivedBytes
+        $ca = @('-s', '-o', 'NUL', '-m', '30', '-w', '%{size_download}'); if ($c.Range) { $ca += @('-r', $c.Range) }
+        [int64]$got = 0; [void][int64]::TryParse([string](curl.exe @ca $c.Url), [ref]$got)
+        $w = (Get-NetAdapterStatistics -Name $c.Want).ReceivedBytes - $w0; $o = (Get-NetAdapterStatistics -Name $c.Other).ReceivedBytes - $o0
+        $detail = "{0} 收到 {1:N0} KB，{2} 收到 {3:N0} KB" -f $c.Want, ($w / 1KB), $c.Other, ($o / 1KB)
+        if ($got -lt 512KB) { Mark '跳过' $c.What ("下载没成功（只下到 {0:N0} KB）" -f ($got / 1KB)) }
+        elseif ($w -ge $got * 0.9 -and $o -lt $got * 0.5) { Mark '通过' $c.What $detail }
+        else { Mark '失败' $c.What $detail }
+    }
+}
+
 # ───────────── 验证模式 ─────────────
 function Invoke-Verify {
     $script:ok = 0; $script:bad = 0
@@ -138,40 +168,53 @@ function Invoke-Verify {
     $tunName = if ($dev) { $dev.Matches[0].Groups[1].Value } else { 'Mihomo' }
     $tun = Get-NetAdapter -Name $tunName -ErrorAction SilentlyContinue
     $tunOn = $tun -and $tun.Status -eq 'Up'
-    $merge = Join-Path $VergeDir 'profiles\Merge.yaml'
-    $bindLine = if (Test-Path $merge) { Select-String -LiteralPath $merge -Pattern '^interface-name:\s*(.+)$' | Select-Object -First 1 } else { $null }
-    $dual = [bool]$bindLine
+    $de = Get-DualExitState
+    $defIf = $null
+    if ($de) { $defIf = if ($de.Default) { $de.Default } else { (Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.Name -ne $de.Clash } | Select-Object -First 1).Name } }
+    $dualText = if (-not $de) { '否' } elseif ($de.Mode -eq 'all') { "all（开 TUN 时一切走 $($de.Clash)，关 TUN 走 $defIf）" } else { "split（代理走 $($de.Clash)，直连走 $defIf）" }
     Say ''
-    Say ("TUN：{0}；双出口：{1}" -f $(if ($tunOn) { '开' } else { '关' }), $(if ($dual) { '是（Clash 出站绑定 ' + $bindLine.Matches[0].Groups[1].Value.Trim() + '）' } else { '否' })) 'Cyan'
+    Say ("TUN：{0}；双出口：{1}" -f $(if ($tunOn) { '开' } else { '关' }), $dualText) 'Cyan'
     if ($tunOn) {
-        $wired = $null
-        if ($dual) { $wired = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.Name -ne $bindLine.Matches[0].Groups[1].Value.Trim() } | Select-Object -First 1 }
-        $before = if ($wired) { (Get-NetAdapterStatistics -Name $wired.Name).SentBytes } else { 0 }
+        $watchAll = $de -and $de.Mode -eq 'all' -and $defIf
+        $before = if ($watchAll) { (Get-NetAdapterStatistics -Name $defIf).SentBytes } else { 0 }
         $c = Trace 'https://claude.ai/cdn-cgi/trace'
         if (-not $c) { Mark '失败' 'Claude 走 AI 节点' '没有响应：AI 组是不是还停在「拒绝」？' }
         elseif ($c.loc -in 'CN', 'HK', 'MO', 'RU', 'IR', 'KP') { Mark '失败' 'Claude 走 AI 节点' "出口 $($c.ip) 在 $($c.loc)，这个地区不支持 AI" }
         else { Mark '通过' 'Claude 走 AI 节点' "出口 $($c.ip)，地区 $($c.loc)" }
         $o = Trace 'https://www.cloudflare.com/cdn-cgi/trace'
         if ($o) { Mark '信息' '其他网站的出口' "$($o.ip)，地区 $($o.loc)（应是「其他」层所选节点）" } else { Mark '失败' '其他网站的出口' '没有响应' }
+        # Google 的请求全部走「其他」层，Google 按它认定的地区决定 Gemini 能不能用
+        $yt = (curl.exe -s -m 15 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130 Safari/537.36' -H 'Accept-Language: en-US' https://www.youtube.com/) -join ''
+        $gl = [regex]::Match($yt, '"GL":"([A-Z]{2})"').Groups[1].Value
+        if (-not $gl) { Mark '跳过' 'Google 认定的地区' '没取到（YouTube 没有响应）' }
+        elseif ($gl -in 'CN', 'HK', 'MO') { Mark '失败' 'Google 认定的地区' "Google 认为你在 $gl，Gemini 等 Google AI 可能用不了：给「其他」层换一个支持 AI 的地区的节点" }
+        else { Mark '通过' 'Google 认定的地区' "$gl（Google 的请求都走「其他」层）" }
         $d = curl.exe -s -m 12 https://myip.ipip.net
         if ($d) { Mark '信息' '国内网站直连' ($d.Trim()) } else { Mark '失败' '国内网站直连' '没有响应' }
         $a = Resolve-DnsName claude.ai -Type A -Server 223.5.5.5 -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue | Where-Object Type -eq 'A' | Select-Object -First 1
         if ($a -and $a.IPAddress -like '198.18.*') { Mark '通过' 'DNS 被 Clash 接管' "外部 DNS 查询拿到假 IP $($a.IPAddress)" } else { Mark '失败' 'DNS 被 Clash 接管' "拿到的是 $($a.IPAddress)" }
         $w = Resolve-DnsName whoami.ds.akahelp.net -Type TXT -DnsOnly -ErrorAction SilentlyContinue | Where-Object Type -eq 'TXT' | ForEach-Object { $_.Strings -join ' ' }
         if ($w) { Mark '信息' 'Clash 自己的境外查询出口' (($w | Where-Object { $_ -match '^ecs' }) -join ' ') } else { Mark '跳过' 'Clash 自己的境外查询出口' '查询没有返回' }
-        if ($wired) {
-            $sent = (Get-NetAdapterStatistics -Name $wired.Name).SentBytes - $before
-            if ($sent -lt 64KB) { Mark '通过' "有线（$($wired.Name)）基本不发数据" ("测试期间只发出 {0:N1} KB" -f ($sent / 1KB)) } else { Mark '失败' "有线（$($wired.Name)）基本不发数据" ("测试期间发出 {0:N1} KB" -f ($sent / 1KB)) }
+        if ($watchAll) {
+            $sent = (Get-NetAdapterStatistics -Name $defIf).SentBytes - $before
+            if ($sent -lt 64KB) { Mark '通过' "默认出口（$defIf）基本不发数据" ("测试期间只发出 {0:N1} KB" -f ($sent / 1KB)) } else { Mark '失败' "默认出口（$defIf）基本不发数据" ("测试期间发出 {0:N1} KB" -f ($sent / 1KB)) }
         }
+        if ($de -and $de.Mode -eq 'split' -and $defIf) { Test-SplitExit $de.Clash $defIf }
     } else {
         Mark '跳过' 'Claude / DNS 相关检查' 'TUN 关着时这些请求会直连出去，所以不测；打开 TUN 后再运行一次 -Verify'
         $o = Trace 'https://www.cloudflare.com/cdn-cgi/trace'
         if ($o) { Mark '信息' 'TUN 关时的出口' "$($o.ip)，地区 $($o.loc)（应是本地网络）" }
-        if ($dual) {
+        if ($de) {
             $r = Find-NetRoute -RemoteIPAddress 1.1.1.1 -ErrorAction SilentlyContinue | Where-Object DestinationPrefix | Select-Object -First 1
-            if ($r -and $r.InterfaceAlias -ne $bindLine.Matches[0].Groups[1].Value.Trim()) { Mark '通过' 'TUN 关时走网线' "系统选 $($r.InterfaceAlias)" } else { Mark '失败' 'TUN 关时走网线' "系统选 $($r.InterfaceAlias)" }
+            $good = $r -and $(if ($defIf) { $r.InterfaceAlias -eq $defIf } else { $r.InterfaceAlias -ne $de.Clash })
+            if ($good) { Mark '通过' "TUN 关时走默认出口（$defIf）" "系统选 $($r.InterfaceAlias)" } else { Mark '失败' "TUN 关时走默认出口（$defIf）" "系统选 $($r.InterfaceAlias)" }
         }
     }
+    # 组合配置只走 IPv4：物理网卡上有公网 IPv6 时，IPv6 流量和网页的 WebRTC 可能绕过 Clash
+    $phys = @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | ForEach-Object Name)
+    $v6 = @(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -match '^[23]' -and $phys -contains $_.InterfaceAlias })
+    if ($v6.Count) { Mark '失败' '没有绕过 Clash 的 IPv6' ("{0} 有公网 IPv6，IPv6 流量可能绕过 Clash。关掉它：Disable-NetAdapterBinding -Name '{0}' -ComponentID ms_tcpip6" -f $v6[0].InterfaceAlias) }
+    else { Mark '通过' '没有绕过 Clash 的 IPv6' '物理网卡上都没有公网 IPv6' }
     $u = @(Get-NetUDPEndpoint -LocalPort 1053 -ErrorAction SilentlyContinue)
     if ($u.Count -eq 0) { Mark '跳过' 'DNS 只监听本机' 'Clash 没在运行' }
     elseif (@($u | Where-Object { $_.LocalAddress -ne '127.0.0.1' }).Count -eq 0) { Mark '通过' 'DNS 只监听本机' '只有 127.0.0.1:1053' }
@@ -205,22 +248,20 @@ proxy-groups:
   - name: 其他
     type: select
     use: {{USE}}
-  # DNS 层：Clash 自己查境外域名时从这里出去。第一项在几个稳定节点间自动切换；没有直连选项。
+  # DNS 层：Clash 自己查境外域名时从这里出去。默认跟「其他」层走同一个节点，也可以单独选一个；没有直连选项。
   - name: DNS
     type: select
-    proxies: ['DNS 自动']
+    proxies: [其他]
     use: {{USE}}
-  - name: 'DNS 自动'
-    type: fallback
-    use: {{USE}}
-    filter: {{DNS_FILTER}}
-    exclude-filter: {{DNS_EXCLUDE}}
-    url: 'https://www.gstatic.com/generate_204'
-    interval: 600
   # 广告开关：PASS = 关闭（继续往下匹配），REJECT = 开启。
   - name: 广告拦截
     type: select
     proxies: {{AD_PROXIES}}
+  # 全局模式（Clash Verge 首页切到「全局」）用这个组：默认跟「其他」层走，选 AI 就一切走 AI 节点。
+  - name: GLOBAL
+    type: select
+    proxies: [其他, AI]
+    use: {{USE}}
 
 rule-providers:
   ai-inline:
@@ -250,15 +291,14 @@ rule-providers:
       # 功能开关
       - DOMAIN,api.statsig.com
       - DOMAIN-SUFFIX,featuregates.org
-      # AI 登录和验证码（多家 AI 共用，和 AI 页面同一个出口，验证才不会因 IP 不一致失败）
-      - DOMAIN,accounts.google.com
+      # AI 登录和验证码（多家 AI 共用，和 AI 页面同一个出口，验证才不会因 IP 不一致失败）。Google 的登录和验证码跟着 Google 走「其他」。
       - DOMAIN,challenges.cloudflare.com
-      - DOMAIN-SUFFIX,recaptcha.net
-      - DOMAIN,recaptchaenterprise.googleapis.com
       - DOMAIN-SUFFIX,hcaptcha.com
       - DOMAIN-SUFFIX,arkoselabs.com
       - DOMAIN-SUFFIX,funcaptcha.com
       - DOMAIN,appleid.apple.com
+      - DOMAIN,idmsa.apple.com
+      - DOMAIN,appleid.cdn-apple.com
       - DOMAIN-SUFFIX,stripe.com
       - DOMAIN-SUFFIX,stripe.network
       # 上游 AI 列表没收的
@@ -348,6 +388,9 @@ rule-providers:
 rules:
   # HTTP/3（QUIC）一律拒绝，浏览器会立刻改用普通 HTTPS：出口更一致，域名识别更准。
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  # Google 整个走「其他」，包括 Gemini、AI Studio 和 Google 登录：Google 按账号判断地区，同一个账号的请求要从同一个出口出去；
+  # 上游还把 Google 一部分国内能连的域名放进了直连，会带着账号 Cookie 暴露真实 IP。所以「其他」层要选一个能正常用 Google 的节点。
+  - GEOSITE,google,其他
   # AI 层：自己写的 Claude 清单最先匹配，不依赖上游。
   - RULE-SET,ai-inline,AI
   - GEOSITE,anthropic,AI
@@ -361,6 +404,8 @@ rules:
   # 通用规则：Loyalsoldier。
   - RULE-SET,loyal-private,DIRECT
   - RULE-SET,loyal-reject,广告拦截
+  # 必应整个走「其他」：上游把它一部分国内能连的域名放进了直连，这些请求会带着账号 Cookie 从你的真实 IP 出去。
+  - DOMAIN-SUFFIX,bing.com,其他
   - RULE-SET,loyal-proxy,其他
   - RULE-SET,loyal-direct,DIRECT
   - RULE-SET,loyal-lancidr,DIRECT,no-resolve
@@ -374,7 +419,6 @@ dns:
   ipv6: false
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
-  fake-ip-filter-mode: blacklist
   fake-ip-filter:
     # 只放必须拿到真实地址的域名；某个程序在 TUN 下出问题时，再把它的域名加到这里。
     # 局域网和保留域名
@@ -418,9 +462,6 @@ dns:
     - 'stun.*.*.*'
     # QQ 快捷登录：必须解析到 127.0.0.1
     - 'localhost.ptlogin2.qq.com'
-  use-hosts: true
-  respect-rules: false
-  prefer-h3: false
   default-nameserver: [223.5.5.5, 119.29.29.29]
   # 固定例外：代理节点自身的地址，直连国内加密 DNS（阿里 + 腾讯）。
   proxy-server-nameserver: ['https://223.5.5.5/dns-query', 'https://1.12.12.12/dns-query']
@@ -449,8 +490,6 @@ sniffer:
       ports: [80, '8080-8880']
     TLS:
       ports: [443, 8443, 9443]
-    QUIC:
-      ports: [443]
   skip-domain:
     - +.apple.co
     - Mijia Cloud
@@ -546,54 +585,56 @@ try {
     }
     if ($TimeZone -ne 'skip' -and -not @(Get-TimeZone -ListAvailable | Where-Object { $_.Id -eq $TimeZone }).Count) { throw "没有这个时区：$TimeZone（用 Get-TimeZone -ListAvailable 查 Id，或填 skip）" }
 
-    # 4. DNS 自动用的节点
-    if (-not $PSBoundParameters.ContainsKey('DnsKeywords')) {
-        while ($true) {
-            $DnsKeywords = Ask "「DNS 自动」在哪些节点之间切换？输入关键词（区分大小写），直接回车 = 新加坡、日本、台湾的 1 倍节点" ''
-            if (Test-Regex $DnsKeywords) { break }
-            Say "  「$DnsKeywords」不是有效的正则表达式，请重新输入" 'Yellow'
-        }
-    } elseif (-not (Test-Regex $DnsKeywords)) { throw "「DNS 自动」的关键词「$DnsKeywords」不是有效的正则表达式。" }
-    $dnsPattern = if ($DnsKeywords) { $DnsKeywords } else { $DnsDefault }
-    $dnsNodes = @(); foreach ($s in $chosen) { $dnsNodes += Get-NodeNames $s.File | Where-Object { $_ -cmatch $dnsPattern -and $_ -cnotmatch $DnsExclude } }
-    if ($dnsNodes.Count -eq 0) { throw '「DNS 自动」一个节点都没有，请换关键词重新运行。' }
-    Say ("  「DNS 自动」会在 {0} 个节点之间切换" -f $dnsNodes.Count)
-
-    # 5. 广告拦截默认开不开
+    # 4. 广告拦截默认开不开
     if (-not $AdBlock) { $AdBlock = Ask-Choice '广告拦截默认开吗？on / off' @('on', 'off') 'off' }
 
-    # 6. 双出口
+    # 5. 双出口
+    if ($DualExit -eq 'yes') { $DualExit = 'all' }
     if (-not $DualExit) {
         Say ''
-        Say '双出口：电脑同时有网线和手机热点，希望开 TUN 时一切走热点、关 TUN 时一切走网线。没有这种情况就选 no。'
-        $DualExit = Ask-Choice '要双出口吗？yes / no' @('yes', 'no') 'no'
+        Say '双出口：电脑同时连着两个网络（比如网线和手机热点）时，可以让流量分开走。只有一个网络就选 no。'
+        Say '  all    开 TUN 时一切经 Clash 从「Clash 出口」出去，关 TUN 时一切走「默认出口」'
+        Say '  split  直连流量走「默认出口」，代理流量（所有节点）走「Clash 出口」；关 TUN 时一切走「默认出口」'
+        $DualExit = Ask-Choice '用哪种？no / all / split' @('no', 'all', 'split', 'yes') 'no'
+        if ($DualExit -eq 'yes') { $DualExit = 'all' }
     }
-    if ($DualExit -eq 'yes') {
+    if ($DualExit -ne 'no') {
         $nics = @(Get-NetAdapter -Physical | Sort-Object Name)
-        if (-not $WiredAdapter -or -not $WifiAdapter) {
-            if ($nics.Count -lt 2) { throw "双出口需要两块物理网卡（网线 + Wi-Fi），这台电脑只找到 $($nics.Count) 块。" }
+        if (-not $DefaultAdapter -or -not $ClashAdapter) {
+            if ($nics.Count -lt 2) { throw "双出口需要两块物理网卡，这台电脑只找到 $($nics.Count) 块。" }
             Say '物理网卡：'
             for ($i = 0; $i -lt $nics.Count; $i++) { Say ("  {0}. {1}（{2}，{3}）" -f ($i + 1), $nics[$i].Name, $nics[$i].InterfaceDescription, $nics[$i].Status) }
             $media = @($nics | ForEach-Object { [string]$_.PhysicalMediaType })
             $defWired = [Array]::IndexOf($media, '802.3') + 1; if ($defWired -lt 1) { $defWired = 1 }
             $defWifi = [Array]::IndexOf($media, 'Native 802.11') + 1; if ($defWifi -lt 1) { $defWifi = 2 }
-            if (-not $WiredAdapter) { $WiredAdapter = $nics[(Ask-Index '哪块是网线（有线）？' $nics.Count "$defWired")].Name }
-            if (-not $WifiAdapter) { $WifiAdapter = $nics[(Ask-Index '哪块连手机热点（Wi-Fi）？' $nics.Count "$defWifi")].Name }
+            if ($defWifi -eq $defWired) { $defWifi = if ($defWired -eq 1) { 2 } else { 1 } }   # 两块都是无线或都是有线时，默认值别指向同一块
+            $defRole = if ($DualExit -eq 'all') { '关 TUN 时一切走它' } else { '直连流量和关 TUN 时都走它' }
+            $clashRole = if ($DualExit -eq 'all') { '开 TUN 时一切走它' } else { '代理流量（所有节点）走它' }
+            if (-not $DefaultAdapter) { $DefaultAdapter = $nics[(Ask-Index "哪块网卡做「默认出口」（$defRole）？" $nics.Count "$defWired")].Name }
+            if (-not $ClashAdapter) { $ClashAdapter = $nics[(Ask-Index "哪块网卡做「Clash 出口」（$clashRole）？" $nics.Count "$defWifi")].Name }
         }
-        if (-not (Get-NetAdapter -Name $WiredAdapter -ErrorAction SilentlyContinue) -or -not (Get-NetAdapter -Name $WifiAdapter -ErrorAction SilentlyContinue)) { throw "找不到网卡「$WiredAdapter」或「$WifiAdapter」。" }
-        if ($WiredAdapter -eq $WifiAdapter) { throw '网线和热点不能是同一块网卡。' }
-        if (-not $HotspotGateway) {
-            $gw = (Get-NetIPConfiguration -InterfaceAlias $WifiAdapter -ErrorAction SilentlyContinue).IPv4DefaultGateway.NextHop | Select-Object -First 1
-            $HotspotGateway = if ($gw) { Ask '热点的网关地址（从热点网卡读到的，回车确认）' $gw } else { Ask "没读到「$WifiAdapter」的网关。先连上热点，运行 ipconfig，把「$WifiAdapter」那一项的「默认网关」填在这里" '' }
+        if (-not (Get-NetAdapter -Name $DefaultAdapter -ErrorAction SilentlyContinue) -or -not (Get-NetAdapter -Name $ClashAdapter -ErrorAction SilentlyContinue)) { throw "找不到网卡「$DefaultAdapter」或「$ClashAdapter」。" }
+        if ($DefaultAdapter -eq $ClashAdapter) { throw '默认出口和 Clash 出口不能是同一块网卡。' }
+        # 局域网域名的 DNS：直连从哪块网卡出去，就用那边的 DNS
+        $lanIf = if ($DualExit -eq 'all') { $ClashAdapter } else { $DefaultAdapter }
+        if (-not $LanDns) {
+            $found = @(Get-DnsClientServerAddress -InterfaceAlias $lanIf -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object ServerAddresses) | Select-Object -First 1
+            if (-not $found) { $found = (Get-NetIPConfiguration -InterfaceAlias $lanIf -ErrorAction SilentlyContinue).IPv4DefaultGateway.NextHop | Select-Object -First 1 }
+            $LanDns = if ($found) { Ask "局域网域名用的 DNS（从「$lanIf」读到的，回车确认）" $found } else { Ask "没读到「$lanIf」的 DNS。运行 ipconfig /all，把「$lanIf」那一项的「DNS 服务器」填在这里" '' }
         }
-        if ($HotspotGateway -notmatch '^(\d{1,3}\.){3}\d{1,3}$') { throw "热点网关「$HotspotGateway」不是 IPv4 地址。" }
+        if ($LanDns -notmatch '^(\d{1,3}\.){3}\d{1,3}$') { throw "局域网 DNS「$LanDns」不是 IPv4 地址。" }
     }
 
     # 汇总
     Say ''
     Say '=== 将要做的事 ===' 'Cyan'
     Say ("  订阅：{0}" -f (($chosen | ForEach-Object Name) -join '、'))
-    Say ("  时区：{0}；广告拦截默认：{1}；双出口：{2}" -f $TimeZone, $AdBlock, $(if ($DualExit -eq 'yes') { "是（网线 $WiredAdapter，热点 $WifiAdapter，网关 $HotspotGateway）" } else { '否' }))
+    $dualText = switch ($DualExit) {
+        'all' { "all（开 TUN 时一切走 $ClashAdapter，关 TUN 走 $DefaultAdapter；局域网 DNS $LanDns）" }
+        'split' { "split（直连走 $DefaultAdapter，代理走 $ClashAdapter；局域网 DNS $LanDns）" }
+        default { '否' }
+    }
+    Say ("  时区：{0}；广告拦截默认：{1}；双出口：{2}" -f $TimeZone, $AdBlock, $dualText)
     if (-not $DryRun -and -not $Yes) {
         Say '  执行时需要先退出 Clash Verge；退出期间 TUN 会断开，所有流量（包括 AI）都会直连。' 'Yellow'
         if ((Ask-Choice '确认开始？y / n' @('yes', 'no') 'y') -ne 'yes') { Say '已取消，什么都没改。'; Pause-End; return }
@@ -601,13 +642,15 @@ try {
 
     # 生成组合配置
     $prov = ''
+    # split：只有节点连接绑在 Clash 出口上，直连照常走系统默认出口
+    $bind = if ($DualExit -eq 'split') { "      interface-name: $(YQ $ClashAdapter)`n" } else { '' }
     foreach ($s in $chosen) {
-        $prov += "  $(YQ $s.Key):`n    type: file`n    path: $(YQ "./profiles/$($s.File)")`n    interval: 3600`n    exclude-filter: $(YQ $InfoFilter)`n    exclude-type: 'direct'`n    override:`n      additional-prefix: $(YQ "[$($s.Key)] ")`n"
+        $prov += "  $(YQ $s.Key):`n    type: file`n    path: $(YQ "./profiles/$($s.File)")`n    interval: 3600`n    exclude-filter: $(YQ $InfoFilter)`n    exclude-type: 'direct'`n    override:`n      additional-prefix: $(YQ "[$($s.Key)] ")`n$bind"
     }
     $use = '[' + (($chosen | ForEach-Object { YQ $_.Key }) -join ', ') + ']'
-    $privateDns = if ($DualExit -eq 'yes') { YQ $HotspotGateway } else { "'system'" }
+    $privateDns = if ($DualExit -ne 'no') { YQ $LanDns } else { "'system'" }
     $adProxies = if ($AdBlock -eq 'on') { '[REJECT, PASS]' } else { '[PASS, REJECT]' }
-    $profileText = $Template.Replace('{{PROVIDERS}}', $prov).Replace('{{USE}}', $use).Replace('{{AI_FILTER}}', (YQ ($aiParts -join '|'))).Replace('{{AI_EXCLUDE}}', (YQ $BlockAI)).Replace('{{DNS_FILTER}}', (YQ $dnsPattern)).Replace('{{DNS_EXCLUDE}}', (YQ $DnsExclude)).Replace('{{AD_PROXIES}}', $adProxies).Replace('{{PRIVATE_DNS}}', $privateDns)
+    $profileText = $Template.Replace('{{PROVIDERS}}', $prov).Replace('{{USE}}', $use).Replace('{{AI_FILTER}}', (YQ ($aiParts -join '|'))).Replace('{{AI_EXCLUDE}}', (YQ $BlockAI)).Replace('{{AD_PROXIES}}', $adProxies).Replace('{{PRIVATE_DNS}}', $privateDns) + "`n"
 
     # 用内核检查生成的配置
     $mihomo = @("$env:ProgramFiles\Clash Verge\verge-mihomo.exe", "$env:LOCALAPPDATA\Programs\Clash Verge\verge-mihomo.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -656,13 +699,13 @@ try {
     } catch { Say "自动对时没设好：$($_.Exception.Message)" 'Yellow' } }
 
     # 系统：双出口
-    if ($DualExit -eq 'yes' -and -not $SkipSystem) {
+    if ($DualExit -ne 'no' -and -not $SkipSystem) {
         foreach ($fam in 'IPv4', 'IPv6') {
-            Set-NetIPInterface -InterfaceAlias $WiredAdapter -AddressFamily $fam -AutomaticMetric Disabled -InterfaceMetric 1 -ErrorAction SilentlyContinue
-            Set-NetIPInterface -InterfaceAlias $WifiAdapter -AddressFamily $fam -AutomaticMetric Disabled -InterfaceMetric 500 -ErrorAction SilentlyContinue
+            Set-NetIPInterface -InterfaceAlias $DefaultAdapter -AddressFamily $fam -AutomaticMetric Disabled -InterfaceMetric 1 -ErrorAction SilentlyContinue
+            Set-NetIPInterface -InterfaceAlias $ClashAdapter -AddressFamily $fam -AutomaticMetric Disabled -InterfaceMetric 500 -ErrorAction SilentlyContinue
         }
-        Disable-NetAdapterBinding -Name $WifiAdapter -ComponentID ms_tcpip6 -Confirm:$false
-        Say "双出口：跃点数 $WiredAdapter=1、$WifiAdapter=500，已关闭 $WifiAdapter 的 IPv6"
+        Disable-NetAdapterBinding -Name $ClashAdapter -ComponentID ms_tcpip6 -Confirm:$false
+        Say "双出口：跃点数 $DefaultAdapter=1、$ClashAdapter=500，已关闭 $ClashAdapter 的 IPv6"
     }
 
     # Clash Verge 基础设置：config.yaml
@@ -682,7 +725,7 @@ try {
     Set-TopKey $cfg 'ipv6' 'false'
     Set-TunKey $cfg 'auto-route' 'true'
     Set-TunKey $cfg 'strict-route' 'true'
-    Set-TunKey $cfg 'auto-detect-interface' $(if ($DualExit -eq 'yes') { 'false' } else { 'true' })
+    Set-TunKey $cfg 'auto-detect-interface' $(if ($DualExit -eq 'all') { 'false' } else { 'true' })
     Write-Text $cfgPath (($cfg -join "`n") + "`n")
 
     # verge.yaml：关 DNS 覆写、关系统代理
@@ -698,7 +741,8 @@ try {
         Say "注意：原来的全局扩展覆写配置里有别的内容，已备份到 $backup\profiles，需要的话手动合并回去。" 'Yellow'
     }
     $merge = "# 由 Setup-ClashAI.ps1 生成（原文件已备份）`nprofile:`n  store-selected: true`n  store-fake-ip: true`n"
-    if ($DualExit -eq 'yes') { $merge += "# 双出口：Clash 的所有出站都从这块网卡出去`ninterface-name: $WifiAdapter`n" }
+    if ($DualExit -ne 'no') { $merge += "# 双出口的设置（-Verify 读这一行，别改）`n# setup-clash-ai dual-exit: mode=$DualExit; clash=$ClashAdapter; default=$DefaultAdapter`n" }
+    if ($DualExit -eq 'all') { $merge += "# 双出口 all：Clash 的所有出站都从这块网卡出去`ninterface-name: $ClashAdapter`n" }
     Write-Text "$VergeDir\profiles\Merge.yaml" $merge
     $gs = "$VergeDir\profiles\Script.js"
     if ((Test-Path $gs) -and ((Read-Text $gs) -notmatch '^\s*//[^\n]*\n\s*function main\(config, profileName\) \{\s*return config;\s*\}\s*$')) {
@@ -747,8 +791,9 @@ try {
     Say ''
     Say '=== 配置完成，接下来请手动做三件事 ===' 'Green'
     Say '  1. 打开 Clash Verge（会自动启用「组合配置」）。'
-    Say '  2. 马上到 Proxies 页，在 AI 组里选一个节点（AI 组默认是「拒绝」，不选的话 AI 服务都连不上）。'
-    Say '  3. 回首页打开 TUN（第一次会要求安装服务）。'
+    Say '  2. 马上到「代理」页，在 AI 组里选一个节点（AI 组默认是「拒绝」，不选的话 AI 服务都连不上）。'
+    Say '     「其他」组也要选好：Google（包括 Gemini）都走它，选一个在支持 Gemini 的地区、能正常打开 Google 的节点。'
+    Say '  3. 回首页打开「虚拟网卡模式」（TUN；第一次会要求安装服务）。'
     Say "  然后运行  powershell -ExecutionPolicy Bypass -File .\Setup-ClashAI.ps1 -Verify  检查。"
     Say "  恢复原样：退出 Clash Verge，把 $backup 里的文件拷回 $VergeDir（网卡原来的跃点数和 IPv6 设置记在同目录的两个 json 里）。"
     Pause-End

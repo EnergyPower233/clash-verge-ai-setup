@@ -9,14 +9,16 @@
 # 每个选项也可以用参数直接给出，给了就不再问，例如：
 #   bash setup-clash-ai.sh --subscriptions all --ai-keywords ';GPT' --timezone Asia/Singapore --adblock off --dual-exit no --yes
 # 其他参数：
-#   --dns-keywords 关键词     「DNS 自动」用哪些节点（空 = 新加坡、日本、台湾的 1 倍节点）
-#   --wired 网卡 --wifi 网卡 --gateway 地址     双出口时用
+#   --dual-exit no|all|split  双出口（见下），配合 --default-if 网卡 --clash-if 网卡 --lan-dns 地址
 #   --clash-dir 目录          Clash Verge 配置目录不在默认位置时
 #   --mihomo 路径             内核不在 /usr/bin/verge-mihomo 时
 #   --skip-system             只改 Clash，不动时区、对时和网络设置
 #
+# 双出口：all = 开 TUN 时一切经 Clash 从「Clash 出口」出去，关 TUN 时一切走「默认出口」；
+#   split = 直连流量走「默认出口」，代理流量（所有节点）走「Clash 出口」。两个出口各是哪块网卡由你选。
+#
 # 会改什么：Clash Verge 的 config.yaml / verge.yaml / profiles.yaml / 全局扩展覆写配置，新增「组合配置」；
-# 系统时区与自动对时；选了双出口时再用 NetworkManager 关掉热点连接的 IPv6、调高它的跃点数。
+# 系统时区与自动对时；选了双出口时再用 NetworkManager 关掉 Clash 出口那条连接的 IPv6、调高它的跃点数。
 # 改之前全部备份到 Clash Verge 配置目录下的 setup-backup-时间 目录。
 # 不会做：禁用任何网卡、改订阅链接、替你选 AI 节点。
 
@@ -28,9 +30,9 @@ set -o pipefail
 
 # ───────────── 参数 ─────────────
 DRY_RUN=0 VERIFY=0 SKIP_SYSTEM=0 YES=0
-SUBSCRIPTIONS='' AI_KEYWORDS='' TIMEZONE='' DNS_KEYWORDS='' ADBLOCK='' DUAL_EXIT=''
-WIRED='' WIFI='' GATEWAY='' CLASH_DIR='' MIHOMO=''
-SUBSCRIPTIONS_SET=0 AI_KEYWORDS_SET=0 DNS_KEYWORDS_SET=0
+SUBSCRIPTIONS='' AI_KEYWORDS='' TIMEZONE='' ADBLOCK='' DUAL_EXIT=''
+DEFAULT_IF='' CLASH_IF='' LAN_DNS='' CLASH_DIR='' MIHOMO=''
+SUBSCRIPTIONS_SET=0 AI_KEYWORDS_SET=0
 
 usage() { sed -n '2,/^$/{s/^# \{0,1\}//;p}' "$0"; }
 
@@ -43,7 +45,7 @@ while (( $# )); do
         --skip-system) SKIP_SYSTEM=1 ;;
         -y|--yes) YES=1 ;;
         -h|--help) usage; exit 0 ;;
-        --subscriptions|--ai-keywords|--timezone|--dns-keywords|--adblock|--dual-exit|--wired|--wifi|--gateway|--clash-dir|--mihomo)
+        --subscriptions|--ai-keywords|--timezone|--adblock|--dual-exit|--default-if|--wired|--clash-if|--wifi|--lan-dns|--gateway|--clash-dir|--mihomo)
             if (( ! has_val )); then
                 (( $# >= 2 )) || { echo "参数 $opt 后面要跟一个值" >&2; exit 2; }
                 val=$2; shift
@@ -52,12 +54,11 @@ while (( $# )); do
                 --subscriptions) SUBSCRIPTIONS=$val SUBSCRIPTIONS_SET=1 ;;
                 --ai-keywords) AI_KEYWORDS=$val AI_KEYWORDS_SET=1 ;;
                 --timezone) TIMEZONE=$val ;;
-                --dns-keywords) DNS_KEYWORDS=$val DNS_KEYWORDS_SET=1 ;;
                 --adblock) ADBLOCK=$val ;;
                 --dual-exit) DUAL_EXIT=$val ;;
-                --wired) WIRED=$val ;;
-                --wifi) WIFI=$val ;;
-                --gateway) GATEWAY=$val ;;
+                --default-if|--wired) DEFAULT_IF=$val ;;   # --wired / --wifi / --gateway 是旧写法
+                --clash-if|--wifi) CLASH_IF=$val ;;
+                --lan-dns|--gateway) LAN_DNS=$val ;;
                 --clash-dir) CLASH_DIR=$val ;;
                 --mihomo) MIHOMO=$val ;;
             esac ;;
@@ -66,7 +67,8 @@ while (( $# )); do
     shift
 done
 [[ -z $ADBLOCK || $ADBLOCK == on || $ADBLOCK == off ]] || { echo '--adblock 只能是 on 或 off' >&2; exit 2; }
-[[ -z $DUAL_EXIT || $DUAL_EXIT == yes || $DUAL_EXIT == no ]] || { echo '--dual-exit 只能是 yes 或 no' >&2; exit 2; }
+[[ -z $DUAL_EXIT || $DUAL_EXIT =~ ^(no|all|split|yes)$ ]] || { echo '--dual-exit 只能是 no、all 或 split' >&2; exit 2; }
+[[ $DUAL_EXIT == yes ]] && DUAL_EXIT=all   # yes 是旧写法
 
 VERGE_DIR=${CLASH_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/io.github.clash-verge-rev.clash-verge-rev}
 PROFILE_NAME='组合配置'
@@ -75,8 +77,6 @@ PROFILE_MARKER='# 组合配置'
 # 默认筛选规则（和 Windows 版、文档里的模板一致）
 REGION_AI='新加坡|狮城|台湾|日本|韩国|美国|加拿大|英国|德国|法国|荷兰|澳大利亚|Singapore|Taiwan|Japan|Korea|United States|USA|Canada|United Kingdom|Germany|France|Netherlands|Australia'
 BLOCK_AI='香港|澳门|中国|俄罗斯|伊朗|朝鲜|Hong Kong|HongKong|Macau|China|Russia'
-DNS_DEFAULT='新加坡|狮城|日本|台湾|Singapore|Japan|Taiwan'
-DNS_EXCLUDE='高倍|[2-9]x|[2-9]X|x[2-9]|香港|Hong Kong'
 INFO_FILTER='剩余|到期|套餐|官网|客服|邮箱|重置|过期|支持AI|Traffic|Expire|Reset'
 
 TZ_LABELS=(新加坡 台北 东京 首尔 美国西部 美国东部 伦敦 不改时区)
@@ -199,8 +199,23 @@ dns_a() { # 先问外部 DNS（被 Clash 接管时应拿到假 IP）；没有 di
     elif command -v nslookup >/dev/null 2>&1; then nslookup "$1" 223.5.5.5 2>/dev/null | awk '/^Address: /{print $2}' | grep -E '^[0-9.]+$' | head -1
     else getent ahostsv4 "$1" 2>/dev/null | awk '{print $1; exit}'; fi
 }
+# split 双出口：分别下载 1 MB，看是哪块网卡在收（会经 Clash 出口用掉约 1 MB 流量）
+test_split_exit() {
+    local kind url range want other what w0 o0 got w o detail
+    for kind in proxy direct; do
+        if [[ $kind == proxy ]]; then url='https://speed.cloudflare.com/__down?bytes=1048576' range='' want=$1 other=$2 what="代理流量走 Clash 出口（$1）"
+        else url='https://mirrors.aliyun.com/ubuntu/ls-lR.gz' range='0-1048575' want=$2 other=$1 what="直连流量走默认出口（$2）"; fi
+        w0=$(cat "/sys/class/net/$want/statistics/rx_bytes"); o0=$(cat "/sys/class/net/$other/statistics/rx_bytes")
+        got=$(curl -s -o /dev/null -m 30 ${range:+-r "$range"} -w '%{size_download}' "$url" 2>/dev/null); got=${got%%.*}; got=${got:-0}
+        w=$(( $(cat "/sys/class/net/$want/statistics/rx_bytes") - w0 )); o=$(( $(cat "/sys/class/net/$other/statistics/rx_bytes") - o0 ))
+        detail="$want 收到 $(( w / 1024 )) KB，$other 收到 $(( o / 1024 )) KB"
+        if (( got < 524288 )); then mark 跳过 "$what" "下载没成功（只下到 $(( got / 1024 )) KB）"
+        elif (( w * 10 >= got * 9 && o * 2 < got )); then mark 通过 "$what" "$detail"
+        else mark 失败 "$what" "$detail"; fi
+    done
+}
 verify() {
-    local ok=0 bad=0 c a d n tun_if bind wired='' before=0 dev listen sent w
+    local ok=0 bad=0 c a d n l tun_if mode='' clash_if='' def_if='' before=0 dev listen sent w gl v6 dual_text=否
     mark() {
         local color
         case $1 in 通过) color=$GREEN; ok=$(( ok + 1 )) ;; 失败) color=$RED; bad=$(( bad + 1 )) ;; 跳过) color=$YELLOW ;; *) color=$CYAN ;; esac
@@ -210,24 +225,38 @@ verify() {
     kv() { sed -n "s/^$1=//p" <<< "$2" | head -1; }
     # TUN 网卡：Clash 的 TUN 地址是 198.18.0.1（Linux 版默认不写设备名，所以按地址找）
     tun_if=$(ip -o -4 addr show 2>/dev/null | awk '{split($4, a, "/"); if (a[1] == "198.18.0.1") { print $2; exit }}')
-    bind=$(sed -n 's/^interface-name:[[:space:]]*//p' "$VERGE_DIR/profiles/Merge.yaml" 2>/dev/null | head -1)
-    bind=$(trim "$bind")
+    # 双出口的设置记在全局扩展覆写配置的一行注释里；旧版本只写了 interface-name，那就是 all
+    local merge=$VERGE_DIR/profiles/Merge.yaml re_de='^# setup-clash-ai dual-exit: mode=(all|split); clash=([^;]+); default=([^;]*)$'
+    if [[ -f $merge ]]; then
+        while IFS= read -r l || [[ -n $l ]]; do
+            l=${l%$'\r'}
+            [[ $l =~ $re_de ]] && { mode=${BASH_REMATCH[1]} clash_if=$(trim "${BASH_REMATCH[2]}") def_if=$(trim "${BASH_REMATCH[3]}"); break; }
+        done < "$merge"
+        if [[ -z $mode ]]; then clash_if=$(trim "$(sed -n 's/^interface-name:[[:space:]]*//p' "$merge" | head -1)"); [[ -n $clash_if ]] && mode=all; fi
+    fi
+    if [[ -n $mode && -z $def_if ]]; then
+        for d in /sys/class/net/*; do
+            n=${d##*/}
+            [[ -e $d/device && $n != "$clash_if" && $(cat "$d/operstate" 2>/dev/null) == up ]] && { def_if=$n; break; }
+        done
+    fi
+    [[ $mode == all ]] && dual_text="all（开 TUN 时一切走 $clash_if，关 TUN 走 $def_if）"
+    [[ $mode == split ]] && dual_text="split（代理走 $clash_if，直连走 $def_if）"
     say ''
-    say "TUN：$([[ -n $tun_if ]] && echo "开（$tun_if）" || echo 关)；双出口：$([[ -n $bind ]] && echo "是（Clash 出站绑定 $bind）" || echo 否)" "$CYAN"
+    say "TUN：$([[ -n $tun_if ]] && echo "开（$tun_if）" || echo 关)；双出口：$dual_text" "$CYAN"
     if [[ -n $tun_if ]]; then
-        if [[ -n $bind ]]; then
-            for d in /sys/class/net/*; do
-                n=${d##*/}
-                [[ -e $d/device && $n != "$bind" && $(cat "$d/operstate" 2>/dev/null) == up ]] && { wired=$n; break; }
-            done
-        fi
-        [[ -n $wired ]] && before=$(cat "/sys/class/net/$wired/statistics/tx_bytes")
+        [[ $mode == all && -n $def_if ]] && before=$(cat "/sys/class/net/$def_if/statistics/tx_bytes")
         c=$(trace https://claude.ai/cdn-cgi/trace)
         if [[ -z $c ]]; then mark 失败 'Claude 走 AI 节点' '没有响应：AI 组是不是还停在「拒绝」？'
         elif [[ $(kv loc "$c") =~ ^(CN|HK|MO|RU|IR|KP)$ ]]; then mark 失败 'Claude 走 AI 节点' "出口 $(kv ip "$c") 在 $(kv loc "$c")，这个地区不支持 AI"
         else mark 通过 'Claude 走 AI 节点' "出口 $(kv ip "$c")，地区 $(kv loc "$c")"; fi
         c=$(trace https://www.cloudflare.com/cdn-cgi/trace)
         if [[ -n $c ]]; then mark 信息 '其他网站的出口' "$(kv ip "$c")，地区 $(kv loc "$c")（应是「其他」层所选节点）"; else mark 失败 '其他网站的出口' '没有响应'; fi
+        # Google 的请求全部走「其他」层，Google 按它认定的地区决定 Gemini 能不能用
+        gl=$(curl -s -m 15 -A 'Mozilla/5.0 (X11; Linux x86_64) Chrome/130 Safari/537.36' -H 'Accept-Language: en-US' https://www.youtube.com/ 2>/dev/null | grep -oE '"GL":"[A-Z]{2}"' | head -1 | cut -d'"' -f4)
+        if [[ -z $gl ]]; then mark 跳过 'Google 认定的地区' '没取到（YouTube 没有响应）'
+        elif [[ $gl =~ ^(CN|HK|MO)$ ]]; then mark 失败 'Google 认定的地区' "Google 认为你在 $gl，Gemini 等 Google AI 可能用不了：给「其他」层换一个支持 AI 的地区的节点"
+        else mark 通过 'Google 认定的地区' "$gl（Google 的请求都走「其他」层）"; fi
         c=$(curl -s -m 12 https://myip.ipip.net 2>/dev/null)
         if [[ -n $c ]]; then mark 信息 '国内网站直连' "$(trim "$c")"; else mark 失败 '国内网站直连' '没有响应'; fi
         a=$(dns_a claude.ai)
@@ -238,20 +267,33 @@ verify() {
         else
             mark 跳过 'Clash 自己的境外查询出口' '没装 dig（dnsutils / bind-utils）'
         fi
-        if [[ -n $wired ]]; then
-            sent=$(( $(cat "/sys/class/net/$wired/statistics/tx_bytes") - before ))
-            if (( sent < 65536 )); then mark 通过 "有线（$wired）基本不发数据" "测试期间只发出 $(( sent / 1024 )) KB"
-            else mark 失败 "有线（$wired）基本不发数据" "测试期间发出 $(( sent / 1024 )) KB"; fi
+        if [[ $mode == all && -n $def_if ]]; then
+            sent=$(( $(cat "/sys/class/net/$def_if/statistics/tx_bytes") - before ))
+            if (( sent < 65536 )); then mark 通过 "默认出口（$def_if）基本不发数据" "测试期间只发出 $(( sent / 1024 )) KB"
+            else mark 失败 "默认出口（$def_if）基本不发数据" "测试期间发出 $(( sent / 1024 )) KB"; fi
         fi
+        if [[ $mode == split && -n $def_if ]]; then test_split_exit "$clash_if" "$def_if"; fi
     else
         mark 跳过 'Claude / DNS 相关检查' 'TUN 关着时这些请求会直连出去，所以不测；打开 TUN 后再运行一次 --verify'
         c=$(trace https://www.cloudflare.com/cdn-cgi/trace)
         [[ -n $c ]] && mark 信息 'TUN 关时的出口' "$(kv ip "$c")，地区 $(kv loc "$c")（应是本地网络）"
-        if [[ -n $bind ]]; then
+        if [[ -n $mode ]]; then
             dev=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
-            if [[ -n $dev && $dev != "$bind" ]]; then mark 通过 'TUN 关时走网线' "系统选 $dev"; else mark 失败 'TUN 关时走网线' "系统选 ${dev:-（没有路由）}"; fi
+            if [[ -n $dev ]] && { [[ -n $def_if && $dev == "$def_if" ]] || [[ -z $def_if && $dev != "$clash_if" ]]; }; then
+                mark 通过 "TUN 关时走默认出口（$def_if）" "系统选 $dev"
+            else
+                mark 失败 "TUN 关时走默认出口（$def_if）" "系统选 ${dev:-（没有路由）}"
+            fi
         fi
     fi
+    # 组合配置只走 IPv4：物理网卡上有公网 IPv6 时，IPv6 流量和网页的 WebRTC 可能绕过 Clash
+    v6=''
+    for d in /sys/class/net/*; do
+        n=${d##*/}
+        [[ -e $d/device ]] && ip -6 -o addr show dev "$n" scope global 2>/dev/null | grep -q . && { v6=$n; break; }
+    done
+    if [[ -n $v6 ]]; then mark 失败 '没有绕过 Clash 的 IPv6' "$v6 有公网 IPv6，IPv6 流量可能绕过 Clash。关掉它（NetworkManager：nmcli connection modify 连接名 ipv6.method disabled）"
+    else mark 通过 '没有绕过 Clash 的 IPv6' '物理网卡上都没有公网 IPv6'; fi
     listen=$(ss -H -lun 2>/dev/null | awk '{print $4}' | grep -E ':1053$')
     if [[ -z $listen ]]; then mark 跳过 'DNS 只监听本机' 'Clash 没在运行'
     elif ! grep -vqE '^127\.0\.0\.1:1053$' <<< "$listen"; then mark 通过 'DNS 只监听本机' '只有 127.0.0.1:1053'
@@ -286,22 +328,20 @@ proxy-groups:
   - name: 其他
     type: select
     use: {{USE}}
-  # DNS 层：Clash 自己查境外域名时从这里出去。第一项在几个稳定节点间自动切换；没有直连选项。
+  # DNS 层：Clash 自己查境外域名时从这里出去。默认跟「其他」层走同一个节点，也可以单独选一个；没有直连选项。
   - name: DNS
     type: select
-    proxies: ['DNS 自动']
+    proxies: [其他]
     use: {{USE}}
-  - name: 'DNS 自动'
-    type: fallback
-    use: {{USE}}
-    filter: {{DNS_FILTER}}
-    exclude-filter: {{DNS_EXCLUDE}}
-    url: 'https://www.gstatic.com/generate_204'
-    interval: 600
   # 广告开关：PASS = 关闭（继续往下匹配），REJECT = 开启。
   - name: 广告拦截
     type: select
     proxies: {{AD_PROXIES}}
+  # 全局模式（Clash Verge 首页切到「全局」）用这个组：默认跟「其他」层走，选 AI 就一切走 AI 节点。
+  - name: GLOBAL
+    type: select
+    proxies: [其他, AI]
+    use: {{USE}}
 
 rule-providers:
   ai-inline:
@@ -331,15 +371,14 @@ rule-providers:
       # 功能开关
       - DOMAIN,api.statsig.com
       - DOMAIN-SUFFIX,featuregates.org
-      # AI 登录和验证码（多家 AI 共用，和 AI 页面同一个出口，验证才不会因 IP 不一致失败）
-      - DOMAIN,accounts.google.com
+      # AI 登录和验证码（多家 AI 共用，和 AI 页面同一个出口，验证才不会因 IP 不一致失败）。Google 的登录和验证码跟着 Google 走「其他」。
       - DOMAIN,challenges.cloudflare.com
-      - DOMAIN-SUFFIX,recaptcha.net
-      - DOMAIN,recaptchaenterprise.googleapis.com
       - DOMAIN-SUFFIX,hcaptcha.com
       - DOMAIN-SUFFIX,arkoselabs.com
       - DOMAIN-SUFFIX,funcaptcha.com
       - DOMAIN,appleid.apple.com
+      - DOMAIN,idmsa.apple.com
+      - DOMAIN,appleid.cdn-apple.com
       - DOMAIN-SUFFIX,stripe.com
       - DOMAIN-SUFFIX,stripe.network
       # 上游 AI 列表没收的
@@ -429,6 +468,9 @@ rule-providers:
 rules:
   # HTTP/3（QUIC）一律拒绝，浏览器会立刻改用普通 HTTPS：出口更一致，域名识别更准。
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  # Google 整个走「其他」，包括 Gemini、AI Studio 和 Google 登录：Google 按账号判断地区，同一个账号的请求要从同一个出口出去；
+  # 上游还把 Google 一部分国内能连的域名放进了直连，会带着账号 Cookie 暴露真实 IP。所以「其他」层要选一个能正常用 Google 的节点。
+  - GEOSITE,google,其他
   # AI 层：自己写的 Claude 清单最先匹配，不依赖上游。
   - RULE-SET,ai-inline,AI
   - GEOSITE,anthropic,AI
@@ -442,6 +484,8 @@ rules:
   # 通用规则：Loyalsoldier。
   - RULE-SET,loyal-private,DIRECT
   - RULE-SET,loyal-reject,广告拦截
+  # 必应整个走「其他」：上游把它一部分国内能连的域名放进了直连，这些请求会带着账号 Cookie 从你的真实 IP 出去。
+  - DOMAIN-SUFFIX,bing.com,其他
   - RULE-SET,loyal-proxy,其他
   - RULE-SET,loyal-direct,DIRECT
   - RULE-SET,loyal-lancidr,DIRECT,no-resolve
@@ -455,7 +499,6 @@ dns:
   ipv6: false
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
-  fake-ip-filter-mode: blacklist
   fake-ip-filter:
     # 只放必须拿到真实地址的域名；某个程序在 TUN 下出问题时，再把它的域名加到这里。
     # 局域网和保留域名
@@ -499,9 +542,6 @@ dns:
     - 'stun.*.*.*'
     # QQ 快捷登录：必须解析到 127.0.0.1
     - 'localhost.ptlogin2.qq.com'
-  use-hosts: true
-  respect-rules: false
-  prefer-h3: false
   default-nameserver: [223.5.5.5, 119.29.29.29]
   # 固定例外：代理节点自身的地址，直连国内加密 DNS（阿里 + 腾讯）。
   proxy-server-nameserver: ['https://223.5.5.5/dns-query', 'https://1.12.12.12/dns-query']
@@ -530,8 +570,6 @@ sniffer:
       ports: [80, '8080-8880']
     TLS:
       ports: [443, 8443, 9443]
-    QUIC:
-      ports: [443]
   skip-domain:
     - +.apple.co
     - Mijia Cloud
@@ -589,29 +627,37 @@ set_ntp() {
         say '没找到 systemd-timesyncd 或 chrony，跳过自动对时。' "$YELLOW"
     fi
 }
-# 双出口：只动热点那条连接（关 IPv6、跃点数调到 600），不碰网线
+# 双出口：只动 Clash 出口那条连接（关 IPv6、跃点数调到 600），不碰默认出口
 set_dual_exit_network() {
     local conn mw mf
     if ! command -v nmcli >/dev/null 2>&1; then
-        say "没有 NetworkManager（nmcli），双出口的网络设置要手动做：关掉「$WIFI」的 IPv6，并让「$WIRED」默认路由的跃点数比它小。" "$YELLOW"
+        say "没有 NetworkManager（nmcli），双出口的网络设置要手动做：关掉「$CLASH_IF」的 IPv6，并让「$DEFAULT_IF」默认路由的跃点数比它小。" "$YELLOW"
         return 0
     fi
-    conn=$(nmcli -g GENERAL.CONNECTION device show "$WIFI" 2>/dev/null)
+    conn=$(nmcli -g GENERAL.CONNECTION device show "$CLASH_IF" 2>/dev/null)
     if [[ -z $conn || $conn == -- ]]; then
-        say "「$WIFI」现在没有连接：连上热点后再运行一次脚本，才能改它的 IPv6 和跃点数。" "$YELLOW"
+        say "「$CLASH_IF」现在没有连接：连上之后再运行一次脚本，才能改它的 IPv6 和跃点数。" "$YELLOW"
         return 0
     fi
     if { "${SUDO[@]}" nmcli connection modify "$conn" ipv6.method disabled 2>/dev/null || "${SUDO[@]}" nmcli connection modify "$conn" ipv6.method ignore; } &&
         "${SUDO[@]}" nmcli connection modify "$conn" ipv4.route-metric 600; then
-        "${SUDO[@]}" nmcli device reapply "$WIFI" >/dev/null 2>&1 || say "  改动要等「$WIFI」重新连接后生效" "$YELLOW"
-        say "双出口：热点连接「$conn」已关闭 IPv6，默认路由跃点数设为 600"
+        "${SUDO[@]}" nmcli device reapply "$CLASH_IF" >/dev/null 2>&1 || say "  改动要等「$CLASH_IF」重新连接后生效" "$YELLOW"
+        say "双出口：Clash 出口的连接「$conn」已关闭 IPv6，默认路由跃点数设为 600"
     else
-        say "没改成热点连接「$conn」的设置，请在网络设置里手动关掉它的 IPv6" "$YELLOW"
+        say "没改成「$conn」的设置，请在网络设置里手动关掉它的 IPv6" "$YELLOW"
     fi
-    mw=$(route_metric "$WIRED"); mf=$(route_metric "$WIFI")
+    mw=$(route_metric "$DEFAULT_IF"); mf=$(route_metric "$CLASH_IF")
     if [[ -n $mw && -n $mf ]] && (( mw >= mf )); then
-        say "注意：「$WIRED」默认路由的跃点数（$mw）不比「$WIFI」（$mf）小，TUN 关时可能走热点。" "$YELLOW"
+        say "注意：「$DEFAULT_IF」默认路由的跃点数（$mw）不比「$CLASH_IF」（$mf）小，TUN 关时可能走「$CLASH_IF」。" "$YELLOW"
     fi
+}
+# 网卡的第一个 IPv4 DNS：NetworkManager → systemd-resolved → 退而求其次用网关
+detect_dns() {
+    local d=''
+    if command -v nmcli >/dev/null 2>&1; then d=$(nmcli -g IP4.DNS device show "$1" 2>/dev/null | head -1); d=${d%% *}; fi
+    if [[ -z $d ]] && command -v resolvectl >/dev/null 2>&1; then d=$(resolvectl dns "$1" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1); fi
+    [[ -n $d ]] || d=$(ip -4 route show default dev "$1" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit }}')
+    printf '%s' "$d"
 }
 
 # ───────────── 主流程 ─────────────
@@ -647,7 +693,7 @@ choose_subscriptions() {
 }
 
 main() {
-    local i j p k n base kw pattern names nodes dns_count gs first existing uid file cur items_at insert_at
+    local i j p k n base kw pattern names nodes gs first existing uid file cur items_at insert_at
     if (( EUID == 0 )) && [[ -z $CLASH_DIR ]]; then
         die '请用普通用户运行，不要加 sudo：配置在你自己的用户目录里，需要 root 的步骤脚本会自己调用 sudo。'
     fi
@@ -707,37 +753,23 @@ main() {
         die "没有这个时区：$TIMEZONE（用 timedatectl list-timezones 查，或填 skip）"
     fi
 
-    # 4. DNS 自动用的节点
-    if (( ! DNS_KEYWORDS_SET )); then
-        while true; do
-            ask '「DNS 自动」在哪些节点之间切换？输入关键词（区分大小写），直接回车 = 新加坡、日本、台湾的 1 倍节点' ''
-            DNS_KEYWORDS=$REPLY_VAL
-            test_regex "$DNS_KEYWORDS" && break
-            say "  「$DNS_KEYWORDS」不是有效的正则表达式，请重新输入" "$YELLOW"
-        done
-    elif ! test_regex "$DNS_KEYWORDS"; then
-        die "「DNS 自动」的关键词「$DNS_KEYWORDS」不是有效的正则表达式。"
-    fi
-    local dns_pattern=${DNS_KEYWORDS:-$DNS_DEFAULT}
-    dns_count=0
-    for i in "${CHOSEN[@]}"; do dns_count=$(( dns_count + $(node_names "${SUB_FILE[i]}" | re_keep "$dns_pattern" | re_drop "$DNS_EXCLUDE" | count_lines) )); done
-    (( dns_count )) || die '「DNS 自动」一个节点都没有，请换关键词重新运行。'
-    say "  「DNS 自动」会在 $dns_count 个节点之间切换"
-
-    # 5. 广告拦截默认开不开
+    # 4. 广告拦截默认开不开
     [[ -n $ADBLOCK ]] || { ask_choice '广告拦截默认开吗？on / off' off on off; ADBLOCK=$REPLY_VAL; }
 
-    # 6. 双出口
+    # 5. 双出口
     if [[ -z $DUAL_EXIT ]]; then
         say ''
-        say '双出口：电脑同时有网线和手机热点，希望开 TUN 时一切走热点、关 TUN 时一切走网线。没有这种情况就选 no。'
-        ask_choice '要双出口吗？yes / no' no yes no; DUAL_EXIT=$REPLY_VAL
+        say '双出口：电脑同时连着两个网络（比如网线和手机热点）时，可以让流量分开走。只有一个网络就选 no。'
+        say '  all    开 TUN 时一切经 Clash 从「Clash 出口」出去，关 TUN 时一切走「默认出口」'
+        say '  split  直连流量走「默认出口」，代理流量（所有节点）走「Clash 出口」；关 TUN 时一切走「默认出口」'
+        ask_choice '用哪种？no / all / split' no no all split yes; DUAL_EXIT=$REPLY_VAL
+        [[ $DUAL_EXIT == yes ]] && DUAL_EXIT=all
     fi
-    if [[ $DUAL_EXIT == yes ]]; then
-        local -a nics=(); local d def_wired=0 def_wifi=0 kind
+    if [[ $DUAL_EXIT != no ]]; then
+        local -a nics=(); local d def_wired=0 def_wifi=0 kind def_role clash_role lan_if found
         for d in /sys/class/net/*; do [[ -e $d/device ]] && nics+=("${d##*/}"); done
-        if [[ -z $WIRED || -z $WIFI ]]; then
-            (( ${#nics[@]} >= 2 )) || die "双出口需要两块物理网卡（网线 + Wi-Fi），这台电脑只找到 ${#nics[@]} 块。"
+        if [[ -z $DEFAULT_IF || -z $CLASH_IF ]]; then
+            (( ${#nics[@]} >= 2 )) || die "双出口需要两块物理网卡，这台电脑只找到 ${#nics[@]} 块。"
             say '物理网卡：'
             for i in "${!nics[@]}"; do
                 if [[ -d /sys/class/net/${nics[i]}/wireless || -e /sys/class/net/${nics[i]}/phy80211 ]]; then
@@ -748,19 +780,24 @@ main() {
                 say "  $(( i + 1 )). ${nics[i]}（$kind，$(cat "/sys/class/net/${nics[i]}/operstate" 2>/dev/null)）"
             done
             (( def_wired )) || def_wired=1; (( def_wifi )) || def_wifi=2
-            [[ -n $WIRED ]] || { ask_index '哪块是网线（有线）？' "${#nics[@]}" "$def_wired"; WIRED=${nics[REPLY_VAL]}; }
-            [[ -n $WIFI ]] || { ask_index '哪块连手机热点（Wi-Fi）？' "${#nics[@]}" "$def_wifi"; WIFI=${nics[REPLY_VAL]}; }
+            (( def_wifi != def_wired )) || def_wifi=$(( def_wired == 1 ? 2 : 1 ))   # 两块都是无线或都是有线时，默认值别指向同一块
+            if [[ $DUAL_EXIT == all ]]; then def_role='关 TUN 时一切走它' clash_role='开 TUN 时一切走它'
+            else def_role='直连流量和关 TUN 时都走它' clash_role='代理流量（所有节点）走它'; fi
+            [[ -n $DEFAULT_IF ]] || { ask_index "哪块网卡做「默认出口」（$def_role）？" "${#nics[@]}" "$def_wired"; DEFAULT_IF=${nics[REPLY_VAL]}; }
+            [[ -n $CLASH_IF ]] || { ask_index "哪块网卡做「Clash 出口」（$clash_role）？" "${#nics[@]}" "$def_wifi"; CLASH_IF=${nics[REPLY_VAL]}; }
         fi
-        [[ -e /sys/class/net/$WIRED && -e /sys/class/net/$WIFI ]] || die "找不到网卡「$WIRED」或「$WIFI」。"
-        [[ $WIRED != "$WIFI" ]] || die '网线和热点不能是同一块网卡。'
-        if [[ -z $GATEWAY ]]; then
-            local gw; gw=$(ip -4 route show default dev "$WIFI" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "via") { print $(i + 1); exit }}')
-            if [[ -n $gw ]]; then ask '热点的网关地址（从热点网卡读到的，回车确认）' "$gw"
-            else ask "没读到「$WIFI」的网关。先连上热点，运行 ip route，把「default via」后面的地址填在这里" ''; fi
-            GATEWAY=$REPLY_VAL
+        [[ -e /sys/class/net/$DEFAULT_IF && -e /sys/class/net/$CLASH_IF ]] || die "找不到网卡「$DEFAULT_IF」或「$CLASH_IF」。"
+        [[ $DEFAULT_IF != "$CLASH_IF" ]] || die '默认出口和 Clash 出口不能是同一块网卡。'
+        # 局域网域名的 DNS：直连从哪块网卡出去，就用那边的 DNS
+        if [[ $DUAL_EXIT == all ]]; then lan_if=$CLASH_IF; else lan_if=$DEFAULT_IF; fi
+        if [[ -z $LAN_DNS ]]; then
+            found=$(detect_dns "$lan_if")
+            if [[ -n $found ]]; then ask "局域网域名用的 DNS（从「$lan_if」读到的，回车确认）" "$found"
+            else ask "没读到「$lan_if」的 DNS。运行 resolvectl dns 或 nmcli device show，把「$lan_if」的 DNS 填在这里" ''; fi
+            LAN_DNS=$REPLY_VAL
         fi
         local re_ip='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-        [[ $GATEWAY =~ $re_ip ]] || die "热点网关「$GATEWAY」不是 IPv4 地址。"
+        [[ $LAN_DNS =~ $re_ip ]] || die "局域网 DNS「$LAN_DNS」不是 IPv4 地址。"
     fi
 
     # 汇总
@@ -768,7 +805,10 @@ main() {
     say ''
     say '=== 将要做的事 ===' "$CYAN"
     say "  订阅：$(join_by '、' "${names[@]}")"
-    say "  时区：$TIMEZONE；广告拦截默认：$ADBLOCK；双出口：$([[ $DUAL_EXIT == yes ]] && echo "是（网线 $WIRED，热点 $WIFI，网关 $GATEWAY）" || echo 否)"
+    local dual_text=否
+    [[ $DUAL_EXIT == all ]] && dual_text="all（开 TUN 时一切走 $CLASH_IF，关 TUN 走 $DEFAULT_IF；局域网 DNS $LAN_DNS）"
+    [[ $DUAL_EXIT == split ]] && dual_text="split（直连走 $DEFAULT_IF，代理走 $CLASH_IF；局域网 DNS $LAN_DNS）"
+    say "  时区：$TIMEZONE；广告拦截默认：$ADBLOCK；双出口：$dual_text"
     if (( ! DRY_RUN && ! YES )); then
         say '  执行时需要先退出 Clash Verge；退出期间 TUN 会断开，所有流量（包括 AI）都会直连。' "$YELLOW"
         ask_choice '确认开始？y / n' y yes no
@@ -782,19 +822,19 @@ main() {
         i=${CHOSEN[p]} k=${KEYS[p]}
         printf -v block "  %s:\n    type: file\n    path: %s\n    interval: 3600\n    exclude-filter: %s\n    exclude-type: 'direct'\n    override:\n      additional-prefix: %s\n" \
             "$(yq "$k")" "$(yq "./profiles/${SUB_FILE[i]}")" "$(yq "$INFO_FILTER")" "$(yq "[$k] ")"
+        # split：只有节点连接绑在 Clash 出口上，直连照常走系统默认出口
+        [[ $DUAL_EXIT == split ]] && block+="      interface-name: $(yq "$CLASH_IF")"$'\n'
         prov+=$block
         quoted+=("$(yq "$k")")
     done
     use="[$(join_by ', ' "${quoted[@]}")]"
-    if [[ $DUAL_EXIT == yes ]]; then private_dns=$(yq "$GATEWAY"); else private_dns="'system'"; fi
+    if [[ $DUAL_EXIT != no ]]; then private_dns=$(yq "$LAN_DNS"); else private_dns="'system'"; fi
     if [[ $ADBLOCK == on ]]; then ad_proxies='[REJECT, PASS]'; else ad_proxies='[PASS, REJECT]'; fi
     profile=$TEMPLATE
     profile=${profile//'{{PROVIDERS}}'/$prov}
     profile=${profile//'{{USE}}'/$use}
     profile=${profile//'{{AI_FILTER}}'/$(yq "$(join_by '|' "${ai_parts[@]}")")}
     profile=${profile//'{{AI_EXCLUDE}}'/$(yq "$BLOCK_AI")}
-    profile=${profile//'{{DNS_FILTER}}'/$(yq "$dns_pattern")}
-    profile=${profile//'{{DNS_EXCLUDE}}'/$(yq "$DNS_EXCLUDE")}
     profile=${profile//'{{AD_PROXIES}}'/$ad_proxies}
     profile=${profile//'{{PRIVATE_DNS}}'/$private_dns}
 
@@ -861,7 +901,7 @@ main() {
         echo "# 路由"; ip route show 2>/dev/null; ip -6 route show 2>/dev/null
         if command -v nmcli >/dev/null 2>&1; then
             echo "# NetworkManager 正在用的连接"; nmcli -t -f NAME,DEVICE,TYPE connection show --active 2>/dev/null
-            [[ -n $WIFI ]] && { k=$(nmcli -g GENERAL.CONNECTION device show "$WIFI" 2>/dev/null); [[ -n $k && $k != -- ]] && nmcli -g ipv6.method,ipv4.route-metric connection show "$k" 2>/dev/null | sed "s/^/$k: /"; }
+            [[ -n $CLASH_IF ]] && { k=$(nmcli -g GENERAL.CONNECTION device show "$CLASH_IF" 2>/dev/null); [[ -n $k && $k != -- ]] && nmcli -g ipv6.method,ipv4.route-metric connection show "$k" 2>/dev/null | sed "s/^/$k: /"; }
         fi
     } > "$backup/system-state.txt" 2>&1
     say "已备份到 $backup" "$GREEN"
@@ -872,7 +912,7 @@ main() {
     else
         set_timezone
         set_ntp
-        [[ $DUAL_EXIT == yes ]] && set_dual_exit_network
+        if [[ $DUAL_EXIT != no ]]; then set_dual_exit_network; fi
     fi
 
     # Clash Verge 基础设置：config.yaml
@@ -881,7 +921,7 @@ main() {
     set_top_key cfg ipv6 false
     set_tun_key cfg auto-route true
     set_tun_key cfg strict-route true
-    if [[ $DUAL_EXIT == yes ]]; then set_tun_key cfg auto-detect-interface false; else set_tun_key cfg auto-detect-interface true; fi
+    if [[ $DUAL_EXIT == all ]]; then set_tun_key cfg auto-detect-interface false; else set_tun_key cfg auto-detect-interface true; fi
     write_lines "$VERGE_DIR/config.yaml" cfg || die '写 config.yaml 失败。'
 
     # verge.yaml：关 DNS 覆写、关系统代理
@@ -897,7 +937,8 @@ main() {
     fi
     {
         printf '# 由 setup-clash-ai.sh 生成（原文件已备份）\nprofile:\n  store-selected: true\n  store-fake-ip: true\n'
-        if [[ $DUAL_EXIT == yes ]]; then printf '# 双出口：Clash 的所有出站都从这块网卡出去\ninterface-name: %s\n' "$WIFI"; fi
+        if [[ $DUAL_EXIT != no ]]; then printf '# 双出口的设置（--verify 读这一行，别改）\n# setup-clash-ai dual-exit: mode=%s; clash=%s; default=%s\n' "$DUAL_EXIT" "$CLASH_IF" "$DEFAULT_IF"; fi
+        if [[ $DUAL_EXIT == all ]]; then printf '# 双出口 all：Clash 的所有出站都从这块网卡出去\ninterface-name: %s\n' "$CLASH_IF"; fi
     } > "$merge_path" || die '写全局扩展覆写配置失败。'
     gs=$VERGE_DIR/profiles/Script.js
     if [[ -f $gs && $(grep -v '^[[:space:]]*//' "$gs" | tr -d '[:space:]') != 'functionmain(config,profileName){returnconfig;}' ]]; then
@@ -956,6 +997,7 @@ main() {
     say '=== 配置完成，接下来请手动做三件事 ===' "$GREEN"
     say '  1. 打开 Clash Verge（会自动启用「组合配置」）。'
     say '  2. 马上到「代理」页，在 AI 组里选一个节点（AI 组默认是「拒绝」，不选的话 AI 服务都连不上）。'
+    say '     「其他」组也要选好：Google（包括 Gemini）都走它，选一个在支持 Gemini 的地区、能正常打开 Google 的节点。'
     say '  3. 回首页打开「虚拟网卡模式」（TUN；第一次会要求安装服务）。'
     say '  然后运行  bash setup-clash-ai.sh --verify  检查。'
     say "  恢复原样：退出 Clash Verge，把 $backup 里的文件拷回 $VERGE_DIR（原来的时区和网络状态记在同目录的 system-state.txt 里）。"

@@ -41,22 +41,20 @@ proxy-groups:
   - name: 其他
     type: select
     use: [订阅A, 订阅B]
-  # DNS 层：Clash 自己查境外域名时从这里出去。第一项在几个稳定节点间自动切换；没有直连选项。
+  # DNS 层：Clash 自己查境外域名时从这里出去。默认跟「其他」层走同一个节点，也可以单独选一个；没有直连选项。
   - name: DNS
     type: select
-    proxies: ['DNS 自动']
+    proxies: [其他]
     use: [订阅A, 订阅B]
-  - name: 'DNS 自动'
-    type: fallback
-    use: [订阅A, 订阅B]
-    filter: '新加坡|狮城|日本|台湾|Singapore|Japan|Taiwan'
-    exclude-filter: '高倍|[2-9]x|[2-9]X|x[2-9]|香港|Hong Kong'
-    url: 'https://www.gstatic.com/generate_204'
-    interval: 600
   # 广告开关：PASS = 关闭（继续往下匹配），REJECT = 开启。
   - name: 广告拦截
     type: select
     proxies: [PASS, REJECT]
+  # 全局模式（Clash Verge 首页切到「全局」）用这个组：默认跟「其他」层走，选 AI 就一切走 AI 节点。
+  - name: GLOBAL
+    type: select
+    proxies: [其他, AI]
+    use: [订阅A, 订阅B]
 
 rule-providers:
   ai-inline:
@@ -83,18 +81,17 @@ rule-providers:
       - DOMAIN-SUFFIX,intercom.io
       - DOMAIN-SUFFIX,intercomcdn.com
       - DOMAIN,cdn.usefathom.com
-      # 审查补的功能开关域名
+      # 功能开关
       - DOMAIN,api.statsig.com
       - DOMAIN-SUFFIX,featuregates.org
-      # AI 登录和验证码（多家 AI 共用，和 AI 页面同一个出口，验证才不会因 IP 不一致失败）
-      - DOMAIN,accounts.google.com
+      # AI 登录和验证码（多家 AI 共用，和 AI 页面同一个出口，验证才不会因 IP 不一致失败）。Google 的登录和验证码跟着 Google 走「其他」。
       - DOMAIN,challenges.cloudflare.com
-      - DOMAIN-SUFFIX,recaptcha.net
-      - DOMAIN,recaptchaenterprise.googleapis.com
       - DOMAIN-SUFFIX,hcaptcha.com
       - DOMAIN-SUFFIX,arkoselabs.com
       - DOMAIN-SUFFIX,funcaptcha.com
       - DOMAIN,appleid.apple.com
+      - DOMAIN,idmsa.apple.com
+      - DOMAIN,appleid.cdn-apple.com
       - DOMAIN-SUFFIX,stripe.com
       - DOMAIN-SUFFIX,stripe.network
       # 上游 AI 列表没收的
@@ -184,6 +181,9 @@ rule-providers:
 rules:
   # HTTP/3（QUIC）一律拒绝，浏览器会立刻改用普通 HTTPS：出口更一致，域名识别更准。
   - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  # Google 整个走「其他」，包括 Gemini、AI Studio 和 Google 登录：Google 按账号判断地区，同一个账号的请求要从同一个出口出去；
+  # 上游还把 Google 一部分国内能连的域名放进了直连，会带着账号 Cookie 暴露真实 IP。所以「其他」层要选一个能正常用 Google 的节点。
+  - GEOSITE,google,其他
   # AI 层：自己写的 Claude 清单最先匹配，不依赖上游。
   - RULE-SET,ai-inline,AI
   - GEOSITE,anthropic,AI
@@ -197,6 +197,8 @@ rules:
   # 通用规则：Loyalsoldier。
   - RULE-SET,loyal-private,DIRECT
   - RULE-SET,loyal-reject,广告拦截
+  # 必应整个走「其他」：上游把它一部分国内能连的域名放进了直连，这些请求会带着账号 Cookie 从你的真实 IP 出去。
+  - DOMAIN-SUFFIX,bing.com,其他
   - RULE-SET,loyal-proxy,其他
   - RULE-SET,loyal-direct,DIRECT
   - RULE-SET,loyal-lancidr,DIRECT,no-resolve
@@ -210,7 +212,6 @@ dns:
   ipv6: false
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
-  fake-ip-filter-mode: blacklist
   fake-ip-filter:
     # 只放必须拿到真实地址的域名；某个程序在 TUN 下出问题时，再把它的域名加到这里。
     # 局域网和保留域名：这些名字本来就不该出局域网
@@ -254,9 +255,6 @@ dns:
     - 'stun.*.*.*'
     # QQ 快捷登录：必须解析到 127.0.0.1
     - 'localhost.ptlogin2.qq.com'
-  use-hosts: true
-  respect-rules: false
-  prefer-h3: false
   # 只用来解析下面 DoH 地址里的域名（这里写的全是 IP，基本用不到）。
   default-nameserver: [223.5.5.5, 119.29.29.29]
   # 固定例外：代理节点自身的地址，直连国内加密 DNS（阿里 + 腾讯）。
@@ -288,8 +286,6 @@ sniffer:
       ports: [80, '8080-8880']
     TLS:
       ports: [443, 8443, 9443]
-    QUIC:
-      ports: [443]
   skip-domain:
     - +.apple.co
     - Mijia Cloud
